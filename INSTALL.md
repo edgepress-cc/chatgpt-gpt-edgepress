@@ -4,7 +4,7 @@ Requires a ChatGPT Plus / Team / Enterprise account (Custom GPT builder access).
 
 ## 1. Mint a token
 
-Log in to your EdgePress admin at `https://<your-tenant>.edgepress.cc/admin/account/api-tokens`. Create a token, copy it (starts with `epat_`).
+Log in to your EdgePress admin at `https://<your-tenant>.edgepress.cc/admin/settings/api-tokens`. Create a token, copy it (starts with `epat_`).
 
 ## 2. Refresh the OpenAPI snapshot
 
