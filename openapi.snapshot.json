@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "EdgePress Tenant API",
-    "version": "1.85.0",
+    "version": "1.88.0",
     "description": "Per-tenant CMS API. Authenticate every request with a personal access token: `Authorization: Bearer epat_...`. Create + manage tokens at `/admin/settings/api-tokens`. Every token-authenticated response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` (epoch seconds); a 429 adds `Retry-After`."
   },
   "servers": [
@@ -1370,7 +1370,7 @@
               0,
               1
             ],
-            "description": "1 exactly when the order is pending_payment AND an online-provider payment attempt (payplus, hyp) is still pending — the shopper was handed to the gateway and no result has come back (typically an abandoned checkout), and the order holds any tracked stock it decremented until it is paid or cancelled. 0 for offline pending_payment orders (waiting on a human, e.g. a bank transfer that has not arrived) and for every order the gateway already answered. There is no automatic expiry in this release — filter ?status=pending_payment and check this flag to find orders holding stock for an abandoned online payment."
+            "description": "1 exactly when the order is pending_payment AND an online-provider payment attempt (payplus, paypal, hyp) is still pending — the shopper was handed to the gateway and no result has come back (typically an abandoned checkout), and the order holds any tracked stock it decremented until it is paid or cancelled. 0 for offline pending_payment orders (waiting on a human, e.g. a bank transfer that has not arrived) and for every order the gateway already answered. There is no automatic expiry in this release — filter ?status=pending_payment and check this flag to find orders holding stock for an abandoned online payment."
           },
           "subtotal": {
             "type": "integer",
@@ -1744,6 +1744,20 @@
                 "type": "string"
               }
             }
+          },
+          "paid_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Unix seconds the order first became paid; set once, null until then. Absent on a tenant not yet upgraded."
+          },
+          "payment_method": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "List rows only: method_name_snapshot of the order's earliest charge payment with status received or refunded; null when no charge took money."
           }
         }
       },
@@ -1861,9 +1875,10 @@
               "bank_transfer",
               "cash_on_delivery",
               "hyp",
-              "payplus"
+              "payplus",
+              "paypal"
             ],
-            "description": "The fixed provider kind this method is backed by — what payment code dispatches on. payplus is implemented (redirect flow: the storefront checkout hands the shopper off to the PayPlus-hosted payment page). hyp is registered but NOT yet implemented: a method may be configured for it, but checkout refuses it as not yet available."
+            "description": "The fixed provider kind this method is backed by — what payment code dispatches on. payplus and paypal are implemented (redirect flow: the storefront checkout hands the shopper off to the provider-hosted payment page). hyp is registered but NOT yet implemented: a method may be configured for it, but checkout refuses it as not yet available."
           },
           "name": {
             "type": "string",
@@ -1898,6 +1913,18 @@
           "updated_at": {
             "type": "integer",
             "description": "Unix seconds."
+          },
+          "country_allow": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z]{2}$"
+            },
+            "maxItems": 250,
+            "description": "The countries this method is offered in: ISO 3166-1 alpha-2 codes, upper-case, de-duplicated; null = every country. Judged at checkout against the billing address country, else the shipping address country, else the request's own country (GET /api/shop/payment-methods, before an address is known). Null on a store whose upgrade has not yet added the column (migration 0359)."
           }
         }
       },
@@ -2355,6 +2382,14 @@
             "default": null,
             "minimum": 1,
             "description": "Days to keep privacy_consent_records rows (P7, migration 0276). NULL — the default on every store, and the value a pre-0276 tenant reads back — means NEVER SWEEP: no record is ever deleted. There is no default number and none is suggested: the rule that would carry one, eprivacy.consent_state.retention_period, is the only row in the pack with an empty source_url (confidence UNVERIFIED, encode: false) because CNIL recommandation 2020-092 was never fetched — the six months widely reported was not read from the document. A positive integer or null; \"180\", 0, 1.5 and true are 400s, never coerced. The sweep it drives is keyed on created_at, NEVER on expires_at (validity is a different, shorter clock than the proof obligation in GDPR Art. 7(1)), is bounded to 10 rows per shopper write, and never deletes a subject's most recent record nor a withdrawal that is their current answer."
+          },
+          "payment_capture": {
+            "type": "string",
+            "enum": [
+              "charge",
+              "authorize"
+            ],
+            "description": "How a gateway payment is taken at checkout, store-wide: 'charge' (the default) takes the money at once; 'authorize' only places a hold on the shopper's card — the order stays pending_payment with an authorized payment row until staff capture it (POST /api/v1/orders/{orderId}/payments/{paymentId}/capture, or moving the order to processing or shipped) or void it (.../void, or cancelling the order). Holds end at the provider (the row's authorized_until); a lapsed one is cancelled by the unpaid-order sweep. Offline methods are unaffected; never selectable per request. Any other value is a 400 (payment_capture must be 'charge' or 'authorize'). Reads as 'charge' on a store whose upgrade has not yet added the column (migration 0360)."
           }
         }
       },
@@ -3160,7 +3195,7 @@
           "status",
           "created_at"
         ],
-        "description": "A contact-form submission (store_form_submissions, store-forms-p2 Tasks 1/6/8/9). `fields`/`values` are populated only by GET /api/v1/form-submissions/{id}, never by the list.",
+        "description": "A contact-form submission (store_form_submissions, store-forms-p2 Tasks 1/6/8/9). `fields` is populated only by GET /api/v1/form-submissions/{id}; `values` by it and by the list with `?include=values`.",
         "properties": {
           "id": {
             "type": "integer"
@@ -3209,7 +3244,7 @@
           },
           "values": {
             "type": "object",
-            "description": "GET /{id} only. The submitted values (values_json), parsed and keyed by field key.",
+            "description": "Field values keyed by field key. GET /{id} always; the list only with `?include=values`.",
             "additionalProperties": true
           }
         }
@@ -6005,6 +6040,99 @@
             "description": "Store only: store_posts.id of the gated posts (/blog/<slug>). Absent on the CMS."
           }
         }
+      },
+      "StoreOrderPayment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "bank_transfer",
+              "cash_on_delivery",
+              "hyp",
+              "payplus",
+              "paypal"
+            ]
+          },
+          "method_name_snapshot": {
+            "type": "string",
+            "description": "The payment method's display name at checkout time — survives the method's deletion."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "received",
+              "failed",
+              "refunded",
+              "reverted",
+              "authorized",
+              "voided"
+            ],
+            "description": "Charge rows: 'pending' (checkout wrote it; also a capture the provider accepted but has not settled, with provider_status set), then 'received' (verified by the gateway, or offline money recorded by staff), 'authorized' (a gateway hold taken while the store's payment_capture is 'authorize': no money moved yet — capture or void it before authorized_until), 'voided' (the hold was released), 'failed' (rejected or declined) or 'reverted' (an offline receipt undone). Refund reservations are 'pending' then 'received' (provider confirmed) or 'failed' (definitively refused — kept as audit trail, excluded from balance). 'refunded' does not appear on payment rows."
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Integer minor units, in the order's own currency — server-computed at checkout."
+          },
+          "currency": {
+            "type": "string"
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "charge",
+              "refund",
+              "orphan",
+              "orphan_refund"
+            ],
+            "description": "What the row IS: 'charge' — money in (every pre-4b row); 'refund' — money out: status 'received' is a confirmed refund, 'pending' is a reservation whose gateway call has not concluded (it still holds its amount against refundable_amount — if it persists, the refund crashed mid-flight and needs reconciling with the gateway), 'failed' is a refused attempt kept as audit trail that holds nothing; 'orphan' — verified money that arrived for an already-settled order, recorded for reconciliation and never counted toward refundable_amount; 'orphan_refund' — that orphan money going back out, with the same pending/received/failed meanings as a refund row, against the orphan's own balance."
+          },
+          "refunds_payment_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The id of the payment row THIS row refunds: the settled charge for a 'refund' row, the orphan row for an 'orphan_refund' row. Null on charge and orphan rows (they refund nothing), and null on a refund recorded before this field existed — such a row cannot be attributed to a single orphan, so this endpoint's per-row orphan refunds are refused on that order until it is resolved in the provider's dashboard. The outstanding amount of one orphan row is its amount minus the non-failed 'orphan_refund' rows naming it."
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional operator-supplied audit note on this payment row (Phase A, migration 0078). Plain text, at most 2000 characters, no control characters. Null when no note was recorded."
+          },
+          "authorized_until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Unix seconds when the provider's authorization hold ends (paypal: the authorization's expiration_time; payplus: 5 days after the order was placed). Null on every row that is not an authorized hold. An order whose hold has lapsed is cancelled by the unpaid-order sweep."
+          },
+          "provider_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The provider's own status word for a payment in flight (e.g. paypal's PENDING on a capture it has not settled), or 'mismatch' when the looked-up transaction did not bind to this order's amount, currency or reference; 'capturing' / 'voiding' for the seconds a staff capture or void of an authorized row is with the provider. Null otherwise. A pending row with provider_status set is never expired as abandoned."
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "integer"
+          }
+        },
+        "description": "One payment row of a store order."
       }
     },
     "responses": {
@@ -12595,7 +12723,7 @@
             }
           }
         },
-        "description": "`theme_palette` (JSON object: primary, accent, text, background, muted, surface — each `#rrggbb`), `theme_fonts` (JSON object: body, heading, mono — a self-hosted family name or `system`) and `color_scheme` (`auto` — the default, also when unset: follow the visitor's device; `light` — never apply dark mode, as set by applying a WordPress design) are validated; an invalid value returns 400 `invalid_theme_setting`. An object value for theme_palette or theme_fonts is stored as its JSON string. `front_page_id`: the id of the published page `/` shows, or empty for the home design; any other value is a 400 `invalid_front_page` (a value equal to the stored one is accepted unchanged). Comments settings: `comments_enabled` (`true`/`false`; default false, turned on by a WordPress import that brings comments), `comments_moderation` (`first` — default: a first comment from an email is held, later ones auto-approve; `all` — every comment held; `none`), `comments_close_days` (whole days after publishing that a post's comments close; 0 = never; default 90). `comments_notify` (`true`/`false`, default true): email the site's admins about comments held for approval, at most once every 15 minutes. Any other value is a 400 `invalid_comment_setting`."
+        "description": "`theme_palette` (JSON object: primary, accent, text, background, muted, surface — each `#rrggbb`), `theme_fonts` (JSON object: body, heading, mono — a self-hosted family name or `system`) and `color_scheme` (`auto` — the default, also when unset: follow the visitor's device; `light` — never apply dark mode, as set by applying a WordPress design) are validated; an invalid value returns 400 `invalid_theme_setting`. An object value for theme_palette or theme_fonts is stored as its JSON string. `front_page_id`: the id of the published page `/` shows, or empty for the home design; any other value is a 400 `invalid_front_page` (a value equal to the stored one is accepted unchanged). Comments settings: `comments_enabled` (`true`/`false`; default false, turned on by a WordPress import that brings comments), `comments_moderation` (`first` — default: a first comment from an email is held, later ones auto-approve; `all` — every comment held; `none`), `comments_close_days` (whole days after publishing that a post's comments close; 0 = never; default 90). `comments_notify` (`true`/`false`, default true): email the site's admins about comments held for approval, at most once every 15 minutes. Any other value is a 400 `invalid_comment_setting`. `site_custom_css` (string, up to 20,000 characters; empty clears it): a stylesheet added to every public page after the theme, validated like a block's custom CSS (no `<`, backslash, `@import`, `javascript:`, `expression()`, `image-set()`/`src()`, remote `url()` — only `data:image/` or a same-site `/path` — and nothing targeting the \"Powered by edgepress.cc\" line); a refused value returns 400 `{error: \"invalid_custom_css\", message}` and writes nothing."
       },
       "delete": {
         "tags": [
@@ -14121,7 +14249,7 @@
           "Store"
         ],
         "summary": "POST /api/shop/checkout",
-        "description": "Turn the current cart into an order. Guest checkout (__Host-shop_cart token) requires email and optionally name in the body and must be same-origin; the order's customer_id is null. Signed-in checkout (__Host-shop_session) must echo __Host-shop_csrf in X-CSRF-Token; contact fields come from the account, and the body may carry only payment_method_id, shipping_address, shipping_method_id and save_address (a bodyless POST is accepted). Line items snapshot name and the live price at checkout; totals are computed server-side in integer minor units — a client-supplied amount, price or currency is rejected by name, never used. Payment (slice 3b): while the store has NO enabled method backed by an implemented provider, checkout works exactly as before and records no payment; once it has at least one, a valid payment_method_id (an id from GET /api/shop/payment-methods) is REQUIRED, and the order gets a 'pending' payment row snapshotting the method's provider and name, with amount/currency taken from the order's own server-computed TOTAL (tax included) and currency. Choosing a method the offer excludes — a provider registered but not yet implemented (hyp), or a gateway provider with no credentials stored for the store's current gateway mode — is refused with 400 payment_method_unavailable before anything is written; the offer and this gate share one rule, so an id that is not offered cannot be accepted by posting it directly. For a gateway-backed method (payplus) the order and its pending payment row are created exactly the same way; the STOREFRONT checkout page then creates the provider payment session server-side and 302s the shopper to the provider-hosted payment page — this API response itself carries no payment link, and the payment is recorded only after server-side verification (gateway callback, or the shopper's return page re-triggering the same verification). The cart is consumed atomically (a guest's __Host-shop_cart cookie is cleared). Order status starts as pending_payment. Rate limited per IP. Tax (slice 5a): when the store has tax_enabled, the order is taxed with the store's current tax_rate and tax_inclusive and SNAPSHOTS both onto itself — tax_amount, tax_rate_bp (basis points, integer) and tax_inclusive are what it charged and the terms it charged under, never recomputed from settings afterwards. Prices that EXCLUDE tax add it on top (total = subtotal + tax_amount); prices that INCLUDE it keep total = subtotal and report the tax extracted out of it. With tax off the three are 0 and total = subtotal. Shipping (slice 5b-a): when the store has shipping_enabled, the body MUST carry shipping_address (see above), the store's flat rate is charged and the order SNAPSHOTS it — shipping_amount, shipping_label ('Shipping') and the six shipping_* address fields — so a later rate change, or a customer editing their address, cannot rewrite this receipt. total then includes the delivery charge, and the payment row books that same total. Tax and shipping share ONE base and ONE rounding: with the store's tax_shipping on, tax is computed over subtotal + shipping_amount, never over the two separately. With shipping off no address is collected or stored, shipping_amount is 0, shipping_label is null and total is exactly what it was before this release. Shipping zones and methods (slice 5b-b): when the store has one or more shipping ZONES configured, the flat rate no longer applies. The submitted shipping_address is matched to a zone server-side (country, then region; most specific wins), and the body must carry a shipping_method_id belonging to THAT zone — omitting it is 400 shipping_method_required, and an id that is unknown, disabled, another store's, or from a different zone is 400 invalid_shipping_method. Nothing is written on either refusal. The amount and the label come off the chosen method row (its free_over threshold, compared against the goods subtotal, can make it 0 — a labelled free delivery, not an absent one), never off the request, and the order additionally snapshots shipping_method_id for operator reporting; shipping_label stays what every surface renders, so deleting a method later cannot rewrite an old receipt. When zones exist and NONE matches the address — or the matching zone has no enabled method — the store does not deliver there and checkout is 400 no_delivery_coverage; it does NOT quietly fall back to the flat rate. With ZERO zones configured, behaviour is exactly slice 5b-a's: the store's flat rate, labelled 'Shipping', with shipping_method_id null. Address book (slice 5b-c): save_address, when exactly boolean true, saves shipping_address to the signed-in customer's address book (a new row, and their default if it is their first) AFTER the order succeeds — a refused or failed checkout saves nothing, however it was set. Ignored entirely for a guest checkout (no customer_id to save under) and for any other value (a truthy string is not accepted — the field must be the JSON boolean). The save is best-effort: a failure (including the address table being briefly absent during a platform upgrade) is logged and never fails the order. Tax engine T1 (spec 1.22.0): the order is priced by the store's tax RULES (store_tax_jurisdictions × store_tax_classes → rates, most specific jurisdiction for the taxable address) per line, half-up in integer minor units, the charged delivery split across the order's rate groups in proportion to their goods; with no rule for the address the store's tax_no_rule_fallback decides — flat (today's rate) or none (no tax; tax_breakdown.treatment not_registered). A tax-inclusive store prices under tax_inclusive_mode (fixed_gross: the listed price is what the shopper pays, the destination rate is extracted; fixed_net: the net at the home rate is fixed and destination tax goes on top — the difference lands in tax_adjustment). A store on the taxjar provider has standard orders priced by TaxJar; any provider failure is priced locally and recorded as tax_provider local_fallback. Each item carries its tax_amount / tax_rate_bp / tax_class_slug and the order its tax_breakdown / tax_provider / tax_adjustment; on a tenant mid-upgrade (columns absent) the order is priced flat and those keys echo the row defaults.",
+        "description": "Turn the current cart into an order. Guest checkout (__Host-shop_cart token) requires email and optionally name in the body and must be same-origin; the order's customer_id is null. Signed-in checkout (__Host-shop_session) must echo __Host-shop_csrf in X-CSRF-Token; contact fields come from the account, and the body may carry only payment_method_id, shipping_address, shipping_method_id and save_address (a bodyless POST is accepted). Line items snapshot name and the live price at checkout; totals are computed server-side in integer minor units — a client-supplied amount, price or currency is rejected by name, never used. Payment (slice 3b): while the store has NO enabled method backed by an implemented provider, checkout works exactly as before and records no payment; once it has at least one, a valid payment_method_id (an id from GET /api/shop/payment-methods) is REQUIRED, and the order gets a 'pending' payment row snapshotting the method's provider and name, with amount/currency taken from the order's own server-computed TOTAL (tax included) and currency. Choosing a method the offer excludes — a provider registered but not yet implemented (hyp), or a gateway provider with no credentials stored for the store's current gateway mode — is refused with 400 payment_method_unavailable before anything is written; the offer and this gate share one rule, so an id that is not offered cannot be accepted by posting it directly. A method is also excluded (1.86.0) when its provider does not take the cart's currency, or its country_allow list does not name the shopper's country (the billing address country, else the shipping address country, else the request's own country). A store that has a usable method (implemented, and configured for the current gateway mode) none of which fits this cart and shopper is refused with 400 payment_method_unavailable even when no payment_method_id is sent: checking out with no payment is only for a store with no usable method at all. For a gateway-backed method (payplus, paypal) the order and its pending payment row are created exactly the same way; the STOREFRONT checkout page then creates the provider payment session server-side and 302s the shopper to the provider-hosted payment page — this API response itself carries no payment link, and the payment is recorded only after server-side verification (gateway callback, or the shopper's return page re-triggering the same verification). The cart is consumed atomically (a guest's __Host-shop_cart cookie is cleared). Order status starts as pending_payment. Rate limited per IP. Tax (slice 5a): when the store has tax_enabled, the order is taxed with the store's current tax_rate and tax_inclusive and SNAPSHOTS both onto itself — tax_amount, tax_rate_bp (basis points, integer) and tax_inclusive are what it charged and the terms it charged under, never recomputed from settings afterwards. Prices that EXCLUDE tax add it on top (total = subtotal + tax_amount); prices that INCLUDE it keep total = subtotal and report the tax extracted out of it. With tax off the three are 0 and total = subtotal. Shipping (slice 5b-a): when the store has shipping_enabled, the body MUST carry shipping_address (see above), the store's flat rate is charged and the order SNAPSHOTS it — shipping_amount, shipping_label ('Shipping') and the six shipping_* address fields — so a later rate change, or a customer editing their address, cannot rewrite this receipt. total then includes the delivery charge, and the payment row books that same total. Tax and shipping share ONE base and ONE rounding: with the store's tax_shipping on, tax is computed over subtotal + shipping_amount, never over the two separately. With shipping off no address is collected or stored, shipping_amount is 0, shipping_label is null and total is exactly what it was before this release. Shipping zones and methods (slice 5b-b): when the store has one or more shipping ZONES configured, the flat rate no longer applies. The submitted shipping_address is matched to a zone server-side (country, then region; most specific wins), and the body must carry a shipping_method_id belonging to THAT zone — omitting it is 400 shipping_method_required, and an id that is unknown, disabled, another store's, or from a different zone is 400 invalid_shipping_method. Nothing is written on either refusal. The amount and the label come off the chosen method row (its free_over threshold, compared against the goods subtotal, can make it 0 — a labelled free delivery, not an absent one), never off the request, and the order additionally snapshots shipping_method_id for operator reporting; shipping_label stays what every surface renders, so deleting a method later cannot rewrite an old receipt. When zones exist and NONE matches the address — or the matching zone has no enabled method — the store does not deliver there and checkout is 400 no_delivery_coverage; it does NOT quietly fall back to the flat rate. With ZERO zones configured, behaviour is exactly slice 5b-a's: the store's flat rate, labelled 'Shipping', with shipping_method_id null. Address book (slice 5b-c): save_address, when exactly boolean true, saves shipping_address to the signed-in customer's address book (a new row, and their default if it is their first) AFTER the order succeeds — a refused or failed checkout saves nothing, however it was set. Ignored entirely for a guest checkout (no customer_id to save under) and for any other value (a truthy string is not accepted — the field must be the JSON boolean). The save is best-effort: a failure (including the address table being briefly absent during a platform upgrade) is logged and never fails the order. Tax engine T1 (spec 1.22.0): the order is priced by the store's tax RULES (store_tax_jurisdictions × store_tax_classes → rates, most specific jurisdiction for the taxable address) per line, half-up in integer minor units, the charged delivery split across the order's rate groups in proportion to their goods; with no rule for the address the store's tax_no_rule_fallback decides — flat (today's rate) or none (no tax; tax_breakdown.treatment not_registered). A tax-inclusive store prices under tax_inclusive_mode (fixed_gross: the listed price is what the shopper pays, the destination rate is extracted; fixed_net: the net at the home rate is fixed and destination tax goes on top — the difference lands in tax_adjustment). A store on the taxjar provider has standard orders priced by TaxJar; any provider failure is priced locally and recorded as tax_provider local_fallback. Each item carries its tax_amount / tax_rate_bp / tax_class_slug and the order its tax_breakdown / tax_provider / tax_adjustment; on a tenant mid-upgrade (columns absent) the order is priced flat and those keys echo the row defaults.",
         "security": [
           {
             "shopperSession": []
@@ -14744,7 +14872,7 @@
             }
           },
           "400": {
-            "description": "cart_empty (no cart, or nothing in it), invalid_email / invalid_name (guest fields), an unknown field — client-supplied totals are rejected — or a payment refusal: payment_method_required (the store has an enabled, implemented method but none was chosen), invalid_payment_method (unknown, disabled or another store's id), payment_method_unavailable (the method's provider — hyp — is registered but not yet implemented; nothing is written). Or a shipping refusal: invalid_shipping_address (see shipping_address), shipping_method_required (the store has zones but no method was chosen), invalid_shipping_method (unknown, disabled, another store's, or a method from a zone this address does not match), no_delivery_coverage (zones are configured and none serves this address, or the matching zone has no enabled method — the store does not deliver there). Nothing is written on any of them. Customer profile C1 adds: invalid_customer_type, business_customers_disabled (customer_type business while the store has allow_business_customers = 0 — 400 here, unlike the shopper profile endpoints' 403, because it is one more checkout validation), company_required, invalid_company (hostile text in company), phone_required, invalid_phone (a phone that cannot be normalised — a member re-posting the account's stored phone verbatim is always accepted), invalid_tax_id (format failure, or tax_id_id not this member's; reason names the type's label), invalid_billing_address."
+            "description": "cart_empty (no cart, or nothing in it), invalid_email / invalid_name (guest fields), an unknown field — client-supplied totals are rejected — or a payment refusal: payment_method_required (a method is offered to this shopper but none was chosen), invalid_payment_method (unknown, disabled or another store's id), payment_method_unavailable (the method is not offered to this shopper: its provider — hyp — is not implemented, a gateway has no credentials for the current mode, the provider does not take the cart currency, or the method's country_allow does not name the shopper's country; also returned with no method chosen when the store has usable methods but none fits; nothing is written). Or a shipping refusal: invalid_shipping_address (see shipping_address), shipping_method_required (the store has zones but no method was chosen), invalid_shipping_method (unknown, disabled, another store's, or a method from a zone this address does not match), no_delivery_coverage (zones are configured and none serves this address, or the matching zone has no enabled method — the store does not deliver there). Nothing is written on any of them. Customer profile C1 adds: invalid_customer_type, business_customers_disabled (customer_type business while the store has allow_business_customers = 0 — 400 here, unlike the shopper profile endpoints' 403, because it is one more checkout validation), company_required, invalid_company (hostile text in company), phone_required, invalid_phone (a phone that cannot be normalised — a member re-posting the account's stored phone verbatim is always accepted), invalid_tax_id (format failure, or tax_id_id not this member's; reason names the type's label), invalid_billing_address."
           },
           "403": {
             "description": "CSRF_INVALID (signed-in, bad or missing X-CSRF-Token) or cross_origin_rejected (guest POST from another origin)."
@@ -16591,7 +16719,7 @@
           "Store"
         ],
         "summary": "GET /api/shop/payment-methods",
-        "description": "The checkout OFFER: the payment methods a shopper may actually pay with — only rows that are enabled by the operator, backed by an implemented provider, and (for a gateway provider) backed by credentials actually stored for the store's CURRENT gateway mode. A configured hyp method is deliberately NOT offered (registered but not yet implemented; nothing can take money through it until a later release). A payplus method is offered only once its credentials for the store's current mode are saved — payplus is implemented via the redirect flow, but offering it unconfigured would place an order and hold stock for a payment that can never start. Offline methods (bank_transfer, cash_on_delivery) need no credentials and are never gated on one. No authentication; per-IP rate limited.",
+        "description": "The checkout OFFER: the payment methods a shopper may actually pay with — only rows that are enabled by the operator, backed by an implemented provider, and (for a gateway provider) backed by credentials actually stored for the store's CURRENT gateway mode. A configured hyp method is deliberately NOT offered (registered but not yet implemented; nothing can take money through it until a later release). A payplus or paypal method is offered only once its credentials for the store's current mode are saved — both are implemented via the redirect flow, but offering it unconfigured would place an order and hold stock for a payment that can never start. Offline methods (bank_transfer, cash_on_delivery) need no credentials and are never gated on one. No authentication; per-IP rate limited. The list is also filtered by currency and country (1.86.0): a gateway method whose provider does not take the store currency is left out (offline methods take any currency), and a method with a country_allow list is offered only when the list names the request's country. The checkout POST re-judges with the billing, else shipping, country.",
         "security": [],
         "responses": {
           "200": {
@@ -16617,7 +16745,8 @@
                             "enum": [
                               "bank_transfer",
                               "cash_on_delivery",
-                              "payplus"
+                              "payplus",
+                              "paypal"
                             ]
                           },
                           "name": {
@@ -16667,7 +16796,7 @@
           "Store"
         ],
         "summary": "POST /api/shop/payment/callback/{provider}",
-        "description": "The payment gateway's server-to-server notification (IPN) for a redirect payment — called by the provider, not by browsers, PATs or agents. Only payplus is implemented in this release: hyp (registered but not yet implemented) and any unknown provider are a 404. The callback body is treated as an untrusted hint: the tenant looks the claimed transaction up against the provider's own API (using the store's saved gateway credentials for its configured gateway_mode) and only a transaction that verifies as an approved charge, created for that exact order, for the order's exact total and currency, records the payment (the pending payment row goes received with the provider transaction id as reference) and moves the order pending_payment → paid through the standard order state machine. A verified charge for an order that has already settled (paid, shipped, refunded, cancelled) never moves the order; instead it is recorded as a reconcilable kind='orphan' payment row on the order — the double-charge evidence, visible in the order's payments list — which never counts toward refundable_amount. A well-formed callback is ALWAYS acknowledged with 200 whether or not it verified — the response reveals nothing about orders, credentials or verification — and a replayed callback for an already-recorded transaction reference is a 200 no-op. Only a malformed (non-JSON-object) body is a 400. Per-IP rate limited. The shopper's return to the storefront (/checkout/return, a page, not an API route) independently re-triggers the same server-side verification, so a lost callback does not lose the payment.",
+        "description": "The payment gateway's server-to-server notification (IPN) for a redirect payment — called by the provider, not by browsers, PATs or agents. payplus is the only provider that sends one: paypal has no webhook in this release (every paypal POST is a 401 once the store has paypal credentials), and hyp (registered but not implemented) and any unknown provider are a 404. The notification must be authenticated by the provider — for payplus, the HMAC in the `hash` header over the raw body, keyed with the store's secret key; a missing or wrong signature is a 401 and no lookup is made. Even an authenticated body is only an untrusted hint: it supplies lookup keys (the provider's payment session, the transaction id, our order reference) and the tenant looks the transaction up against the provider's own API, using the store's saved gateway credentials for its configured gateway_mode. Only a transaction that verifies as created for that exact order, for the charge row's exact amount and currency, records anything: an approved charge makes the row received and moves the order pending_payment → paid once its received charges cover the total; an authorization (the store's payment_capture is 'authorize') makes the row authorized and leaves the order pending_payment until staff capture or void it; a declined payment makes the row failed (the shopper can try again from the return page). A verified charge for an order that has already settled (paid, shipped, refunded, cancelled) never moves the order; it is recorded as a reconcilable kind='orphan' payment row on the order — the double-charge evidence, visible in the order's payments list — which never counts toward refundable_amount. A store with no credential for the provider in its current mode acknowledges with 200 and records nothing. Every authenticated callback is acknowledged with 200 whether or not it verified — the response reveals nothing about orders, credentials or verification — and a replay for an already-recorded transaction reference is a 200 no-op. Per-IP rate limited. The shopper's return to the storefront (/checkout/return, a page, not an API route) independently re-triggers the same server-side verification, so a lost callback does not lose the payment.",
         "security": [],
         "parameters": [
           {
@@ -16677,7 +16806,8 @@
             "schema": {
               "type": "string",
               "enum": [
-                "payplus"
+                "payplus",
+                "paypal"
               ]
             }
           }
@@ -16688,13 +16818,19 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "description": "The provider's IPN payload, passed through as-is. Only two fields are consulted, and both only as lookup keys: transaction_uid (the provider transaction to verify) and more_info (the order id the payment session was created for). Nothing in the body is ever trusted as the outcome.",
+                "description": "The provider's notification payload, passed through as-is; the signature is checked over these exact bytes before anything is read. Read only for lookup keys — payplus: the payment page request uid, the transaction uid and more_info (our order reference), at the top level or inside `transaction`. Nothing in the body is ever trusted as the outcome.",
                 "properties": {
                   "transaction_uid": {
                     "type": "string"
                   },
+                  "page_request_uid": {
+                    "type": "string"
+                  },
                   "more_info": {
                     "type": "string"
+                  },
+                  "transaction": {
+                    "type": "object"
                   }
                 }
               }
@@ -16703,7 +16839,7 @@
         },
         "responses": {
           "200": {
-            "description": "Acknowledged. Returned for every well-formed callback — verified, unverified, unknown order, or replay — so the gateway stops retrying; whether anything was recorded is deliberately not disclosed.",
+            "description": "Acknowledged. Returned for every authenticated callback — verified, unverified, unknown order, or replay — and when the store has no credential for the provider, so the gateway stops retrying; whether anything was recorded is deliberately not disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -16717,8 +16853,8 @@
               }
             }
           },
-          "400": {
-            "description": "Malformed body (not a JSON object)."
+          "401": {
+            "description": "unauthorized: the notification is not authenticated (payplus: the `hash` header is missing or does not match; paypal: always). Nothing is looked up."
           },
           "404": {
             "description": "Provider not implemented (hyp) or unknown."
@@ -19748,7 +19884,7 @@
             }
           },
           "400": {
-            "description": "Bad request",
+            "description": "Bad request `admin_requires_collaborator` when role is admin: admins are EdgePress collaborators, added under Collaborators at app.edgepress.cc.",
             "content": {
               "application/json": {
                 "schema": {
@@ -19795,7 +19931,7 @@
             }
           },
           "400": {
-            "description": "Bad request",
+            "description": "Bad request `admin_requires_collaborator` when role is admin: admins are EdgePress collaborators, added under Collaborators at app.edgepress.cc.",
             "content": {
               "application/json": {
                 "schema": {
@@ -19970,6 +20106,30 @@
                         "store"
                       ],
                       "description": "Which EdgePress product this tenant runs: \"cms\" (absent also means cms) or \"store\"."
+                    },
+                    "site": {
+                      "type": "object",
+                      "description": "The site's identity, for labelling a connection: `name` is the site title (CMS) or store name, falling back to the host; `host` is the hostname the request reached.",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "host": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "profile": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "landing",
+                        "offer",
+                        null
+                      ],
+                      "description": "The product profile this tenant runs (\"landing\" on the CMS, \"offer\" on the store), or null for the full product."
                     }
                   }
                 }
@@ -22169,7 +22329,7 @@
           "Store"
         ],
         "summary": "GET /api/v1/customers",
-        "description": "List the store's shopper accounts, newest first — active and disabled alike. Rows never include password_hash or the account's live phone number. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route — the call returns 404 (or 401 when authentication fails first) and never store data. Authenticated with a store PAT; read-only tokens may only GET. Response envelope: { data, total, counts }. `total` is data.length for THIS response (page size after filters/limit), not a whole-store row count. `counts` is whole-store and filter-independent — it drives tab labels, not the current page. Customer profile C1 (1.21.0): rows also carry phone, email_verified_at, customer_type, tax_status (best across the customer's tax IDs) and company (the business legal_name) — read through guarded joins, so on a tenant still finishing the 0177-0181 migrations the list answers with the defaults (individual / none / null) rather than failing. C2 (1.23.0): rows carry tags (names) and pending_exemptions (count); filter with ?tag=<slug> and ?pending_exemptions=1.",
+        "description": "List the store's shopper accounts, newest first — active and disabled alike. Rows never include password_hash or the account's live phone number. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route — the call returns 404 (or 401 when authentication fails first) and never store data. Authenticated with a store PAT; read-only tokens may only GET. Response envelope: { data, total, counts }. `total` is data.length for THIS response (page size after filters/limit), not a whole-store row count. `counts` is whole-store and filter-independent — it drives tab labels, not the current page. Customer profile C1 (1.21.0): rows also carry phone, email_verified_at, customer_type, tax_status (best across the customer's tax IDs) and company (the business legal_name) — read through guarded joins, so on a tenant still finishing the 0177-0181 migrations the list answers with the defaults (individual / none / null) rather than failing. C2 (1.23.0): rows carry tags (names) and pending_exemptions (count); filter with ?tag=<slug> and ?pending_exemptions=1. Zapier (Find Customer): ?email=<addr> is an exact, case-insensitive match (same row shape); it cannot be combined with after_id, tag or pending_exemptions (400).",
         "security": [
           {
             "bearerAuth": []
@@ -22272,6 +22432,14 @@
               ]
             },
             "description": "Only customers with at least one tax exemption awaiting review (C2 1.23.0); empty page pre-0227."
+          },
+          {
+            "name": "email",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ]
       }
@@ -27111,7 +27279,7 @@
           "Settings"
         ],
         "summary": "GET /api/v1/email-credentials",
-        "description": "Report whether this store has a connected Brevo account: configured, the visible from_address/from_name and both timestamps — never the API key. There is no read-back call for the key by design (write-only, the same rule gateway credentials follow): an owner who has lost it reconnects it from Brevo's own dashboard, through PUT. No master-key gate here — a missing platform encryption binding must never stop an owner from seeing whether their own account is connected. Served by BOTH products, admin only: a store has one account per store; a CMS site has one per site, and it carries staff invites, held-comment notices and member mail (a site without one sends no mail). The CMS answers the same bodies and error codes except store_not_provisioned. READ-ONLY PATs MAY NOT CALL THIS, on either product: the read is itself the privileged act, so a read-only token is 403 read_only_token — from the route-policy middleware on a store (since spec 1.31.0), from the handler on a CMS site (since 1.70.0). A full-access PAT or a cookie session reads it normally.",
+        "description": "Report whether this site/store has a connected email account, which provider it is on, and the providers an owner may connect: configured, provider (slug, or null when not configured), provider_on (false when not configured or when the admin has since switched that provider off — it keeps sending, but the owner should move), failing_since (unix seconds of the first auth/sender send failure since the last success, else null), the visible from_address/from_name, both timestamps, and providers: the offered list in the admin's order, each with slug, name, signupUrl, recommended, order and fields [{name,label,secret}] — what a PUT's `credentials` must contain. Never any secret value: there is no read-back call by design (write-only, the same rule gateway credentials follow). No master-key gate here. Served by BOTH products, admin only; a store has one account per store, a CMS site one per site (staff invites, held-comment notices, member mail). READ-ONLY PATs MAY NOT CALL THIS, on either product: 403 read_only_token (route-policy middleware on a store since 1.31.0, the handler on a CMS site since 1.70.0).",
         "security": [
           {
             "bearerAuth": []
@@ -27119,7 +27287,7 @@
         ],
         "responses": {
           "200": {
-            "description": "OK. `configured: false` reports every other field as null.",
+            "description": "OK. `configured: false` reports every account field as null (provider null, provider_on false); `providers` is always present.",
             "content": {
               "application/json": {
                 "schema": {
@@ -27159,6 +27327,65 @@
                         "null"
                       ],
                       "description": "Unix seconds."
+                    },
+                    "provider": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Provider slug (brevo, mailjet, sendpulse, mailersend, ...), null when not configured. A row saved before 1.88.0 is brevo."
+                    },
+                    "provider_on": {
+                      "type": "boolean",
+                      "description": "Whether that provider is currently offered. false for an account whose provider the admin switched off (it still sends) and when nothing is configured."
+                    },
+                    "failing_since": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "description": "Unix seconds of the first auth/sender send failure since the last success; null when healthy."
+                    },
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "slug": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "signupUrl": {
+                            "type": "string",
+                            "description": "https only."
+                          },
+                          "recommended": {
+                            "type": "boolean"
+                          },
+                          "order": {
+                            "type": "integer"
+                          },
+                          "fields": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "label": {
+                                  "type": "string"
+                                },
+                                "secret": {
+                                  "type": "boolean"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -27203,7 +27430,7 @@
           "Settings"
         ],
         "summary": "PUT /api/v1/email-credentials",
-        "description": "Connect (or replace) this store's own Brevo account: exactly api_key, from_address and a nullable from_name — an unknown field is a 400 unknown_field:<name>, never silently ignored. The key is verified against Brevo BEFORE it is stored, on two DISTINCT failures: invalid_api_key (the key itself is rejected — Brevo answers 401/403 on GET /account) and sender_not_verified (the key is fine, but from_address is not one of that account's verified, active senders — the response's message names the address). A transport failure while verifying refuses the save as verification_unavailable (503, safe to retry) rather than storing a key that has never been proven to work. The key is encrypted at rest and NEVER returned by any endpoint — the success body is {\"success\": true, \"configured\": true} and nothing more. Returns 503 email_credentials_unavailable while the platform encryption key is not yet configured (checked AFTER body validation, so a malformed body is still reported as its own 400 first). Slice 5c-c: once connected, this account — never a shared platform address — is what emails_enabled's mail actually sends from; see StoreSettings.emails_enabled. Served by BOTH products, admin only: a store has one account per store; a CMS site has one per site, and it carries staff invites, held-comment notices and member mail (a site without one sends no mail). The CMS answers the same bodies and error codes except store_not_provisioned. Read-only tokens may only GET.",
+        "description": "Connect (or replace) this site/store's own email account on one of the offered providers. Body: {provider, credentials:{<field>:value}, from_address, from_name?}; `credentials` holds exactly the fields GET `providers[].fields` lists for that provider (Brevo: api_key; Mailjet: api_key + secret_key; SendPulse: client_id + client_secret; MailerSend: api_token). An unknown provider is 400 unknown_provider, an unknown top-level key or credentials field is 400 unknown_field:<name>. A body WITHOUT `provider` is the pre-1.88.0 shape {api_key, from_address, from_name?} and is Brevo. Switching TO a provider the admin has not offered is 400 provider_not_offered (staying on the provider already connected is allowed even after it was switched off). The credentials are verified with the vendor BEFORE they are stored, on two DISTINCT failures: invalid_api_key (the key is rejected) and sender_not_verified (the key is fine, from_address is not a verified sender — `message` names the address); where a vendor cannot list senders, a real test message to from_address stands in for the sender check. A transport failure while verifying is verification_unavailable (503, safe to retry); nothing is stored. Secrets are encrypted at rest and NEVER returned: success is {success:true, configured:true, provider}. 503 email_credentials_unavailable while the platform encryption key is not configured (checked after body validation). Served by BOTH products, admin only; read-only tokens may only GET (and not even that, see GET).",
         "security": [
           {
             "bearerAuth": []
@@ -27216,20 +27443,32 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "api_key",
                   "from_address"
                 ],
                 "additionalProperties": false,
                 "properties": {
+                  "provider": {
+                    "type": "string",
+                    "description": "Provider slug from GET providers[].slug. Omit only to send the old {api_key} body, which means brevo."
+                  },
+                  "credentials": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "description": "The provider's fields by name, each trimmed, 1-500 characters (the adapter may cap lower), no control characters. Never echoed back."
+                  },
                   "api_key": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500,
-                    "description": "The store's Brevo API key. Trimmed of leading/trailing whitespace before use; any REMAINING (embedded) control character is a 400. Never echoed back by any response, ever."
+                    "description": "Old shape only (no `provider`): the Brevo API key."
                   },
                   "from_address": {
                     "type": "string",
-                    "description": "Must already be a verified, active sender on that Brevo account — checked against Brevo's own sender list before saving. Containment-checked as an email address at the boundary, not full RFC 5322; the real check is Brevo's."
+                    "description": "Must be a sender the vendor accepts for that account (verified sender, or domain) — checked before saving. Containment-checked as an email address at the boundary."
                   },
                   "from_name": {
                     "type": [
@@ -27239,14 +27478,15 @@
                     "maxLength": 100,
                     "description": "Optional display name shown in the From header. Defaults to null."
                   }
-                }
+                },
+                "description": "New shape: provider + credentials. Old shape: api_key alone (Brevo). Exactly one of the two."
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Stored. The key itself is never echoed back.",
+            "description": "Stored. Secrets are never echoed back.",
             "content": {
               "application/json": {
                 "schema": {
@@ -27263,6 +27503,10 @@
                       "enum": [
                         true
                       ]
+                    },
+                    "provider": {
+                      "type": "string",
+                      "description": "The provider now connected."
                     }
                   }
                 }
@@ -27270,7 +27514,7 @@
             }
           },
           "400": {
-            "description": "A malformed body — \"A JSON object body is required\", \"api_key must be a string of 1-500 characters\", \"api_key must not contain control characters\", \"from_address must be an email address\", \"from_name must be a string of at most 100 characters\", or unknown_field:<name> for any key other than api_key/from_address/from_name — or a Brevo-verified rejection: invalid_api_key (the key itself is wrong) or sender_not_verified (from_address is not a verified sender on that account; `message` names the address).",
+            "description": "A malformed body — \"A JSON object body is required\", unknown_provider, \"credentials must be an object\", \"<field> must be a string of 1-N characters\", \"<field> must not contain control characters\", \"from_address must be an email address\", \"from_name must be a string of at most 100 characters\", or unknown_field:<name> — provider_not_offered (the admin has not offered that provider) — or a vendor-verified rejection: invalid_api_key or sender_not_verified (`message` names the address).",
             "content": {
               "application/json": {
                 "schema": {
@@ -27558,7 +27802,7 @@
           "Store"
         ],
         "summary": "GET /api/v1/form-submissions",
-        "description": "On a store site: the operator's contact-form inbox (store_form_submissions, store-forms-p2 Tasks 1/6/8/9), NEWEST FIRST, keyset-paged on `id` like /api/v1/reviews (`next_cursor` → `?cursor=`). Unfiltered by default (no implicit `status`). List rows are a lean preview — `fields`/`values` are GET /{id}-only, but `notified_at` rides along here too so the inbox can flag a submission the owner was never emailed about without a second request. `?format=csv` streams EVERY row the filters match, not just the current page — an export capped at the page size would silently hand the owner an incomplete file. The CSV header is `submitted_at,status,form_name` then the union of field keys across the matched rows' fields_snapshot, in first-seen order (never alphabetised, so a form's own field order survives into the spreadsheet). Any cell whose text begins with `=`, `+`, `-` or `@` is prefixed with a single quote — otherwise Excel/Sheets executes it as a formula the instant the file is opened, a direct path from a filled-in contact form to code running on the owner's machine. Authenticated with a store PAT; read-only tokens may GET. On a CMS or landing site this path is the form block's inbox instead, the same handler as `GET /api/form-submissions`: admin and editor only (plugin tokens always refused), the CMS row shape and filters (`status`, `form_name`, `since`, `limit`, `cursor`), JSON by default, text/csv for `?format=csv`.",
+        "description": "On a store site: the operator's contact-form inbox (store_form_submissions, store-forms-p2 Tasks 1/6/8/9), NEWEST FIRST, keyset-paged on `id` like /api/v1/reviews (`next_cursor` → `?cursor=`). Unfiltered by default (no implicit `status`). List rows are a lean preview — `fields` is GET /{id}-only and `values` needs `?include=values`, but `notified_at` rides along here too so the inbox can flag a submission the owner was never emailed about without a second request. `?format=csv` streams EVERY row the filters match, not just the current page — an export capped at the page size would silently hand the owner an incomplete file. The CSV header is `submitted_at,status,form_name` then the union of field keys across the matched rows' fields_snapshot, in first-seen order (never alphabetised, so a form's own field order survives into the spreadsheet). Any cell whose text begins with `=`, `+`, `-` or `@` is prefixed with a single quote — otherwise Excel/Sheets executes it as a formula the instant the file is opened, a direct path from a filled-in contact form to code running on the owner's machine. Authenticated with a store PAT; read-only tokens may GET. On a CMS or landing site this path is the form block's inbox instead, the same handler as `GET /api/form-submissions`: admin and editor only (plugin tokens always refused), the CMS row shape and filters (`status`, `form_name`, `since`, `limit`, `cursor`), JSON by default, text/csv for `?format=csv`.",
         "security": [
           {
             "bearerAuth": []
@@ -27617,6 +27861,18 @@
               "minimum": 1
             },
             "description": "The previous page's `next_cursor`."
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "values"
+              ]
+            },
+            "description": "`values`: each listed row also carries `values` (what the visitor typed, keyed by field key), exactly as GET /{id} returns it. Any other value is 400."
           },
           {
             "name": "format",
@@ -27843,7 +28099,8 @@
                               "bank_transfer",
                               "cash_on_delivery",
                               "hyp",
-                              "payplus"
+                              "payplus",
+                              "paypal"
                             ]
                           },
                           "mode": {
@@ -27908,7 +28165,7 @@
           "Store"
         ],
         "summary": "PUT /api/v1/gateway-credentials/{provider}",
-        "description": "Store (create or replace) the gateway credentials for one provider and mode. The body is the provider’s exact required field set — payplus: api_key, secret_key, payment_page_uid; hyp: user, password; bank_transfer and cash_on_delivery: an empty object {}. Every field is a required non-empty string of at most 500 characters; an unknown field is a 400 unknown_field:<name>, never ignored. Credentials are encrypted at rest and NEVER returned by any endpoint — the success body is {\"success\": true, \"configured\": true} and nothing more. Configuring a registered-but-unimplemented provider (hyp) is allowed; taking money through it is refused at checkout until it is implemented. Returns 503 gateway_credentials_unavailable while the platform encryption key is not yet configured. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route — the call returns 404 (or 401 when authentication fails first) and never store data. Authenticated with a store PAT; read-only tokens may only GET.",
+        "description": "Store (create or replace) the gateway credentials for one provider and mode. The body is the provider’s exact required field set — payplus: api_key, secret_key, payment_page_uid, plus the optional terminal_uid and cashier_uid (needed only to void a hold on the day it was taken; without them a void is refused and staff refund instead); paypal: client_id, client_secret (the REST app's credentials from the PayPal developer dashboard — sandbox ones for mode=test, live ones for mode=live); hyp: user, password; bank_transfer and cash_on_delivery: an empty object {}. Every required field is a non-empty string of at most 500 characters, and an optional one is omitted, empty or a string of at most 500; a PUT replaces the whole credential, so re-saving payplus without the optional uids drops them; an unknown field is a 400 unknown_field:<name>, never ignored. Credentials are encrypted at rest and NEVER returned by any endpoint — the success body is {\"success\": true, \"configured\": true} and nothing more. Configuring a registered-but-unimplemented provider (hyp) is allowed; taking money through it is refused at checkout until it is implemented. Returns 503 gateway_credentials_unavailable while the platform encryption key is not yet configured. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route — the call returns 404 (or 401 when authentication fails first) and never store data. Authenticated with a store PAT; read-only tokens may only GET.",
         "security": [
           {
             "bearerAuth": []
@@ -27925,7 +28182,8 @@
                 "bank_transfer",
                 "cash_on_delivery",
                 "hyp",
-                "payplus"
+                "payplus",
+                "paypal"
               ]
             }
           },
@@ -27949,7 +28207,7 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "description": "Exactly the provider’s required fields, each a non-empty string of at most 500 characters.",
+                "description": "Exactly the provider’s required fields, each a non-empty string of at most 500 characters, plus any of its optional fields (payplus: terminal_uid, cashier_uid).",
                 "additionalProperties": {
                   "type": "string"
                 }
@@ -28057,7 +28315,8 @@
                 "bank_transfer",
                 "cash_on_delivery",
                 "hyp",
-                "payplus"
+                "payplus",
+                "paypal"
               ]
             }
           },
@@ -28559,7 +28818,7 @@
           "Store"
         ],
         "summary": "GET /api/v1/orders",
-        "description": "List the store's orders, newest first (placed_at, then id, both descending). All statuses are returned by default — ?status= narrows to one. Paged: ?limit= (default 50, max 100) and ?offset=. Guest orders (customer_id null) are always included alongside account orders. Served by STORE tenants only; read-only tokens may GET. Orders are created by shopper checkout; status transitions are supported via PATCH /api/v1/orders/{id} (order status), PATCH /api/v1/orders/{id}/payments/{paymentId} (offline receipt / release reservation), and POST /api/v1/orders/{id}/refunds (refund reservation). Each order carries its shipping snapshot too — shipping_amount, shipping_label and the six shipping_* address fields (slice 5b-a), plus shipping_method_id (slice 5b-b, the chosen method as an operator-reporting reference; null under the flat rate or once that method is deleted) — which are what the order was charged and where the parcel goes, never the store's current shipping settings; they are absent on orders placed before those columns existed. Response envelope: { data, total, counts }. `total` is data.length for THIS response (page size after filters/limit), not a whole-store row count. `counts` is whole-store and filter-independent — it drives tab labels, not the current page.",
+        "description": "List the store's orders, newest first (placed_at, then id, both descending). All statuses are returned by default — ?status= narrows to one. Paged: ?limit= (default 50, max 100) and ?offset=. Guest orders (customer_id null) are always included alongside account orders. Served by STORE tenants only; read-only tokens may GET. Orders are created by shopper checkout; status transitions are supported via PATCH /api/v1/orders/{id} (order status), PATCH /api/v1/orders/{id}/payments/{paymentId} (offline receipt / release reservation), and POST /api/v1/orders/{id}/refunds (refund reservation). Each order carries its shipping snapshot too — shipping_amount, shipping_label and the six shipping_* address fields (slice 5b-a), plus shipping_method_id (slice 5b-b, the chosen method as an operator-reporting reference; null under the flat rate or once that method is deleted) — which are what the order was charged and where the parcel goes, never the store's current shipping settings; they are absent on orders placed before those columns existed. Every row also carries discount_total (minor units; absent on a tenant that predates the column) and payment_method (the method name of the order's earliest charge that took money, received or since refunded; null when none). Response envelope: { data, total, counts }. `total` is data.length for THIS response (page size after filters/limit), not a whole-store row count. `counts` is whole-store and filter-independent — it drives tab labels, not the current page.",
         "security": [
           {
             "bearerAuth": []
@@ -28607,6 +28866,42 @@
               "default": 0
             },
             "description": "Rows to skip. Negative is a 400."
+          },
+          {
+            "name": "paid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            },
+            "description": "1 = only orders that have been paid (paid_at set) and are not back at pending_payment (a reverted payment leaves the feed until the order is paid again, then it returns at its first paid_at), newest payment first. Cannot be combined with sort. 503 upgrade_pending while the tenant's paid_at migration has not run."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "updated"
+              ]
+            },
+            "description": "updated = most recently updated first (updated_at DESC, id DESC). Default is newest placed first."
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "items"
+              ]
+            },
+            "description": "items = each order gains items: [{name, sku, quantity, unit_price, line_total}] (purchase-time snapshots, read in one query). sku is null: the store keeps no SKU."
           }
         ],
         "responses": {
@@ -28652,7 +28947,7 @@
             }
           },
           "400": {
-            "description": "Invalid status, limit or offset",
+            "description": "Invalid status, limit or offset; unknown paid/sort/include value; paid combined with sort",
             "content": {
               "application/json": {
                 "schema": {
@@ -28682,7 +28977,7 @@
             "$ref": "#/components/responses/RateLimited"
           },
           "503": {
-            "description": "Store not yet provisioned",
+            "description": "Store not yet provisioned (store_not_provisioned), or upgrade pending (upgrade_pending: ?paid=1 on a tenant whose paid_at migration has not run yet)",
             "content": {
               "application/json": {
                 "schema": {
@@ -28695,7 +28990,11 @@
                       ]
                     },
                     "error": {
-                      "type": "string"
+                      "type": "string",
+                      "enum": [
+                        "store_not_provisioned",
+                        "upgrade_pending"
+                      ]
                     }
                   }
                 }
@@ -28802,7 +29101,7 @@
             "$ref": "#/components/responses/RateLimited"
           },
           "409": {
-            "description": "illegal_transition:<ids> — at least one order cannot make this move (e.g. an unpaid pending_payment order cannot be shipped; a refunded order cannot be cancelled). Nothing is applied.",
+            "description": "illegal_transition:<ids> — at least one order cannot make this move (e.g. an unpaid pending_payment order cannot be shipped; a refunded order cannot be cancelled). Nothing is applied. Or authorized_hold:<ids> — a cancel names orders it would move that still hold an authorized gateway payment (an already-cancelled order is a no-op and never counts): nothing is applied; cancel those one at a time (PATCH /api/v1/orders/{id} voids the hold first) or void them (POST /api/v1/orders/{orderId}/payments/{paymentId}/void).",
             "content": {
               "application/json": {
                 "schema": {
@@ -28912,78 +29211,7 @@
                           "type": "array",
                           "description": "Payment rows on this order, oldest first: charges, refunds, orphan and orphan_refund rows, told apart by kind. Each charge row's id is the paymentId for PATCH /api/v1/orders/{orderId}/payments/{paymentId}; each orphan row's id is the payment_id for POST /api/v1/orders/{orderId}/refunds. A refund row names what it refunds in refunds_payment_id.",
                           "items": {
-                            "type": "object",
-                            "properties": {
-                              "id": {
-                                "type": "integer"
-                              },
-                              "provider": {
-                                "type": "string",
-                                "enum": [
-                                  "bank_transfer",
-                                  "cash_on_delivery",
-                                  "hyp",
-                                  "payplus"
-                                ]
-                              },
-                              "method_name_snapshot": {
-                                "type": "string",
-                                "description": "The payment method's display name at checkout time — survives the method's deletion."
-                              },
-                              "status": {
-                                "type": "string",
-                                "enum": [
-                                  "pending",
-                                  "received",
-                                  "failed",
-                                  "refunded"
-                                ],
-                                "description": "Charge rows are 'pending' (checkout wrote it) then 'received' (gateway confirmed) or 'failed' (rejected). Refund reservations are 'pending' then 'received' (provider confirmed) or 'failed' (definitively refused — kept as audit trail, excluded from balance). 'refunded' does not appear on payment rows."
-                              },
-                              "amount": {
-                                "type": "integer",
-                                "description": "Integer minor units, in the order's own currency — server-computed at checkout."
-                              },
-                              "currency": {
-                                "type": "string"
-                              },
-                              "reference": {
-                                "type": [
-                                  "string",
-                                  "null"
-                                ]
-                              },
-                              "kind": {
-                                "type": "string",
-                                "enum": [
-                                  "charge",
-                                  "refund",
-                                  "orphan",
-                                  "orphan_refund"
-                                ],
-                                "description": "What the row IS: 'charge' — money in (every pre-4b row); 'refund' — money out: status 'received' is a confirmed refund, 'pending' is a reservation whose gateway call has not concluded (it still holds its amount against refundable_amount — if it persists, the refund crashed mid-flight and needs reconciling with the gateway), 'failed' is a refused attempt kept as audit trail that holds nothing; 'orphan' — verified money that arrived for an already-settled order, recorded for reconciliation and never counted toward refundable_amount; 'orphan_refund' — that orphan money going back out, with the same pending/received/failed meanings as a refund row, against the orphan's own balance."
-                              },
-                              "refunds_payment_id": {
-                                "type": [
-                                  "integer",
-                                  "null"
-                                ],
-                                "description": "The id of the payment row THIS row refunds: the settled charge for a 'refund' row, the orphan row for an 'orphan_refund' row. Null on charge and orphan rows (they refund nothing), and null on a refund recorded before this field existed — such a row cannot be attributed to a single orphan, so this endpoint's per-row orphan refunds are refused on that order until it is resolved in the provider's dashboard. The outstanding amount of one orphan row is its amount minus the non-failed 'orphan_refund' rows naming it."
-                              },
-                              "notes": {
-                                "type": [
-                                  "string",
-                                  "null"
-                                ],
-                                "description": "Optional operator-supplied audit note on this payment row (Phase A, migration 0078). Plain text, at most 2000 characters, no control characters. Null when no note was recorded."
-                              },
-                              "created_at": {
-                                "type": "integer"
-                              },
-                              "updated_at": {
-                                "type": "integer"
-                              }
-                            }
+                            "$ref": "#/components/schemas/StoreOrderPayment"
                           }
                         },
                         "booking_timezone": {
@@ -29055,7 +29283,7 @@
           "Store"
         ],
         "summary": "PATCH /api/v1/orders/{id}",
-        "description": "Move the order through its lifecycle: body is exactly {status} — one of processing, shipped, completed, cancelled, refunded. Legal moves: pending_payment → cancelled; paid → processing | cancelled | refunded; processing → shipped | cancelled | refunded; shipped → completed | refunded (cancel is unavailable once shipped — the goods are gone, refund is the path); completed → refunded; cancelled → refunded; refunded is terminal. An illegal move is a 409 and changes nothing. 'refunded' has one extra gate: an order whose settled charge was taken by an online gateway (payplus) cannot be marked refunded until refund rows the gateway confirmed cover the captured amount — this endpoint never contacts the gateway, so marking such an order refunded by hand would record a refund whose money never moved; it is a 409 pointing at POST /api/v1/orders/{orderId}/refunds, which actually sends the money back (a full refund through it transitions the order automatically). A pending refund reservation does not open the gate — only confirmed ('received') refunds count. Offline charges are unaffected: refunding a bank transfer out-of-band and recording it here is exactly what the move is for. Marking an order refunded counts as a refund, so it also needs the money area: an Orders staff person (who may make every other move) gets 403 {error: 'insufficient_role', area: 'money'}. 'paid' is NEVER settable here — recording payment receipt (PATCH /api/v1/orders/{orderId}/payments/{paymentId}) is the only route to paid, and asking for it is a 409. Both cancelled and refunded return each line's quantity to its product's stock, exactly once per order — the ordinary cancelled → refunded sequence does not restock twice, and the order's restocked_at records when stock came back. Only TRACKED products are touched: an untracked product (stock null) stays untracked, nothing is written to it. Refunding restocks even when the goods were not returned: for a tracked product, correct its stock field afterwards if they weren't — never by writing a number onto an untracked product, which would silently turn tracking on. If the order's status changed concurrently between read and write, the call is a 409 and changes nothing — re-read and retry. An unknown body field is a 400 unknown_field:<name>, never silently ignored. Another store's order id, an unknown id or a malformed id is a plain 404. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route. Authenticated with a store PAT; read-only tokens may only GET.",
+        "description": "Move the order through its lifecycle: body is exactly {status} — one of processing, shipped, completed, cancelled, refunded. Legal moves: pending_payment → cancelled; paid → processing | cancelled | refunded; processing → shipped | cancelled | refunded; shipped → completed | refunded (cancel is unavailable once shipped — the goods are gone, refund is the path); completed → refunded; cancelled → refunded; refunded is terminal. An illegal move is a 409 and changes nothing. 'refunded' has one extra gate: an order whose settled charge was taken by an online gateway (payplus, paypal) cannot be marked refunded until refund rows the gateway confirmed cover the captured amount — this endpoint never contacts the gateway, so marking such an order refunded by hand would record a refund whose money never moved; it is a 409 pointing at POST /api/v1/orders/{orderId}/refunds, which actually sends the money back (a full refund through it transitions the order automatically). A pending refund reservation does not open the gate — only confirmed ('received') refunds count. Offline charges are unaffected: refunding a bank transfer out-of-band and recording it here is exactly what the move is for. Marking an order refunded counts as a refund, so it also needs the money area: an Orders staff person (who may make every other move) gets 403 {error: 'insufficient_role', area: 'money'}. 'paid' is NEVER settable here — recording payment receipt (PATCH /api/v1/orders/{orderId}/payments/{paymentId}) is the only route to paid, and asking for it is a 409. Both cancelled and refunded return each line's quantity to its product's stock, exactly once per order — the ordinary cancelled → refunded sequence does not restock twice, and the order's restocked_at records when stock came back. Only TRACKED products are touched: an untracked product (stock null) stays untracked, nothing is written to it. Refunding restocks even when the goods were not returned: for a tracked product, correct its stock field afterwards if they weren't — never by writing a number onto an untracked product, which would silently turn tracking on. If the order's status changed concurrently between read and write, the call is a 409 and changes nothing — re-read and retry. An unknown body field is a 400 unknown_field:<name>, never silently ignored. Another store's order id, an unknown id or a malformed id is a plain 404. Authorized payments (1.86.0; the store's payment_capture is 'authorize'): such an order stays pending_payment with an authorized charge row. Moving it to processing or shipped CAPTURES the hold first — the capture moves it to paid and the requested move continues in the same request; a refused capture moves nothing and is a 409 naming the provider's error (capture_failed: <reason>, or not_authorized_state / gateway_not_configured), a capture the provider accepted but left pending is a 409 (re-check the payment, then move the order), and a capture that leaves the order short of its total (an unpaid offline part of a split) is a 409. Moving it to cancelled VOIDS the hold first, then cancels. A void refused because the hold is already gone or can no longer be voided (expired, already released, or a payplus hold past its same-day window) still cancels, and the 200 carries warning: 'The payment hold could not be voided - it expires on its own'. A void refused because the provider already CAPTURED the hold is a 409 already_captured: <hint> that cancels nothing - capture the payment (POST .../capture records it) and refund it if needed. Any other refused or unanswered void is a 409 void_failed: <reason> that cancels nothing. If the order moved while the void ran, the hold is voided and the call is a 409 (re-read and retry). A capture or void already running on the same charge makes a second one a 409 not_authorized_state. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route. Authenticated with a store PAT; read-only tokens may only GET.",
         "security": [
           {
             "bearerAuth": []
@@ -29114,6 +29342,10 @@
                     },
                     "id": {
                       "type": "integer"
+                    },
+                    "warning": {
+                      "type": "string",
+                      "description": "Present only when a cancel could not void the order's authorized payment hold because the hold is already gone or can no longer be voided: 'The payment hold could not be voided - it expires on its own'. The order IS cancelled."
                     }
                   }
                 }
@@ -29169,7 +29401,7 @@
             }
           },
           "409": {
-            "description": "The move is not legal from the order's current status (Cannot transition <from> -> <to>), status was 'paid' — which only recording payment receipt can set — the order's money sits with an online gateway (payplus) and confirmed refunds do not yet cover the captured amount — use POST /api/v1/orders/{orderId}/refunds to actually send the money back — or the order's status changed concurrently while the transition was processing (nothing happened; re-read and retry)",
+            "description": "The move is not legal from the order's current status (Cannot transition <from> -> <to>), status was 'paid' — which only recording payment receipt can set — the order's money sits with an online gateway (payplus, paypal) and confirmed refunds do not yet cover the captured amount — use POST /api/v1/orders/{orderId}/refunds to actually send the money back — or the order's status changed concurrently while the transition was processing (nothing happened; re-read and retry); or, on an order holding an authorized gateway payment: the capture taken before processing/shipped was refused (capture_failed: <reason>, not_authorized_state, gateway_not_configured), was left pending at the provider, or left the order short of its total; or the order changed while its hold was being voided for a cancel (the hold is voided; re-read and retry); or a cancel whose void was refused for any reason but a gone hold: already_captured: <hint> (the provider already captured the hold - capture it to record the payment) or void_failed: <reason> - the order is NOT cancelled",
             "content": {
               "application/json": {
                 "schema": {
@@ -29252,7 +29484,7 @@
                   "method_id": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Id of an enabled offline payment method belonging to this store. Gateway providers (payplus, hyp) are refused with 400."
+                    "description": "Id of an enabled offline payment method belonging to this store. Gateway providers (payplus, paypal, hyp) are refused with 400."
                   },
                   "amount": {
                     "type": "integer",
@@ -29433,7 +29665,7 @@
           "Store"
         ],
         "summary": "PATCH /api/v1/orders/{orderId}/payments/{paymentId}",
-        "description": "Record that the money for an OFFLINE payment arrived: the payment goes 'received' and the order goes pending_payment → paid. Offline only — a payment made through an online gateway (payplus) is refused with 409 and nothing is written: such a payment is settled solely by the tenant's own server-side verification of the gateway transaction, and its reference holds the gateway's transaction id, which that verification reads. On a charge row it accepts ONLY status: 'received'. The one other operation this endpoint offers is releasing a STRANDED REFUND RESERVATION: a row with kind 'refund' or 'orphan_refund' and status 'pending' (left when a crash or timeout interrupted a refund between reserving and confirming) blocks all further refunds of its own balance on the order until an operator, having checked the provider's dashboard, resolves it — status 'failed' records that the money never moved (the reservation is released and the refundable balance returns; a reference is refused, there is nothing to reference), or status 'received' with the provider's own REFUND reference (required) records that it did move. Only a pending refund or orphan_refund row can be released (anything else is a 409), a reference already recorded on another payment is a 409 (the usual mistake is pasting the charge's transaction uid instead of the refund's), and the release never moves the ORDER's status — once confirmed refunds cover the capture, PATCH /api/v1/orders/{id} marks the order refunded and restocks. An orphan payment (kind 'orphan') is never mutated here: its money is refunded, or its out-of-band return recorded, through POST /api/v1/orders/{orderId}/refunds with payment_id, which writes an orphan_refund row and leaves the orphan row 'received' as the durable record of what arrived; status 'refunded' is a 400 on every row. Other ORDER status transitions are made with PATCH /api/v1/orders/{id}, but this call remains the only route to paid. Idempotent: repeating the call returns 200, and an order that has already moved past pending_payment (e.g. shipped) is never dragged back to paid — only the payment row updates. Recording receipt on a payment that is not pending or received (failed, reverted, refunded) is a 409, and so is a partial receipt (amount below the row's) on a payment that is already received — only a pending payment can be split. Recording receipt on a cancelled or refunded order is a 409 — the money already left, and a received payment on a dead order would be a silent contradiction; recording receipt on an online gateway payment is a 409 whatever the order's status. An unknown body field is rejected with 400 unknown_field:<name>, never silently ignored, and a reference over 200 characters is a 400, never truncated. The payment must belong to the order in the URL and to this store; any mismatch, unknown id or malformed id is a plain 404. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route — the call returns 404 (or 401 when authentication fails first) and never store data. Authenticated with a store PAT; read-only tokens may only GET.",
+        "description": "Record that the money for an OFFLINE payment arrived: the payment goes 'received' and the order goes pending_payment → paid. Offline only — a payment made through an online gateway (payplus, paypal) is refused with 409 and nothing is written: such a payment is settled solely by the tenant's own server-side verification of the gateway transaction, and its reference holds the gateway's transaction id, which that verification reads. On a charge row it accepts ONLY status: 'received'. The one other operation this endpoint offers is releasing a STRANDED REFUND RESERVATION: a row with kind 'refund' or 'orphan_refund' and status 'pending' (left when a crash or timeout interrupted a refund between reserving and confirming) blocks all further refunds of its own balance on the order until an operator, having checked the provider's dashboard, resolves it — status 'failed' records that the money never moved (the reservation is released and the refundable balance returns; a reference is refused, there is nothing to reference), or status 'received' with the provider's own REFUND reference (required) records that it did move. Only a pending refund or orphan_refund row can be released (anything else is a 409), a reference already recorded on another payment is a 409 (the usual mistake is pasting the charge's transaction uid instead of the refund's), and the release never moves the ORDER's status — once confirmed refunds cover the capture, PATCH /api/v1/orders/{id} marks the order refunded and restocks. An orphan payment (kind 'orphan') is never mutated here: its money is refunded, or its out-of-band return recorded, through POST /api/v1/orders/{orderId}/refunds with payment_id, which writes an orphan_refund row and leaves the orphan row 'received' as the durable record of what arrived; status 'refunded' is a 400 on every row. Other ORDER status transitions are made with PATCH /api/v1/orders/{id}, but this call remains the only route to paid. Idempotent: repeating the call returns 200, and an order that has already moved past pending_payment (e.g. shipped) is never dragged back to paid — only the payment row updates. Recording receipt on a payment that is not pending or received (failed, reverted, refunded) is a 409, and so is a partial receipt (amount below the row's) on a payment that is already received — only a pending payment can be split. Recording receipt on a cancelled or refunded order is a 409 — the money already left, and a received payment on a dead order would be a silent contradiction; recording receipt on an online gateway payment is a 409 whatever the order's status. An unknown body field is rejected with 400 unknown_field:<name>, never silently ignored, and a reference over 200 characters is a 400, never truncated. The payment must belong to the order in the URL and to this store; any mismatch, unknown id or malformed id is a plain 404. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route — the call returns 404 (or 401 when authentication fails first) and never store data. Authenticated with a store PAT; read-only tokens may only GET.",
         "security": [
           {
             "bearerAuth": []
@@ -29542,7 +29774,7 @@
             }
           },
           "409": {
-            "description": "Receipt cannot be recorded: the payment is in a terminal state (failed/reverted/refunded), a partial receipt names an already-received payment, the order is cancelled or refunded (the money already left), or the payment was made through an online gateway (payplus) and is settled only by the tenant's server-side verification of the gateway transaction, never by hand, the refund row addressed is not a pending reservation (already resolved — settled money records do not flip), or the reference is already recorded on another payment (enter the refund's own uid, not the charge's), or a refund reservation under a minute old is released as failed while its gateway call may still be running (refund_in_flight: wait a minute, check the provider, then release it)",
+            "description": "Receipt cannot be recorded: the payment is in a terminal state (failed/reverted/refunded), a partial receipt names an already-received payment, the order is cancelled or refunded (the money already left), or the payment was made through an online gateway (payplus, paypal) and is settled only by the tenant's server-side verification of the gateway transaction, never by hand, the refund row addressed is not a pending reservation (already resolved — settled money records do not flip), or the reference is already recorded on another payment (enter the refund's own uid, not the charge's), or a refund reservation under a minute old is released as failed while its gateway call may still be running (refund_in_flight: wait a minute, check the provider, then release it)",
             "content": {
               "application/json": {
                 "schema": {
@@ -29769,6 +30001,396 @@
         }
       }
     },
+    "/api/v1/orders/{orderId}/payments/{paymentId}/capture": {
+      "parameters": [
+        {
+          "name": "orderId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "name": "paymentId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "POST /api/v1/orders/{orderId}/payments/{paymentId}/capture",
+        "description": "Capture an AUTHORIZED gateway charge (a hold taken at checkout while the store's payment_capture is 'authorize'). The tenant asks the provider to capture the full authorized amount and records the result through the same server-side settle path a checkout payment takes: the row goes received (its reference becomes the capture id, which a refund is keyed on) and the order pending_payment → paid once its received charges cover the total (paid email, bookings confirmed). If the provider accepts the capture but leaves it PENDING, the row goes back to pending with provider_status set and the order is NOT paid: re-check it later (.../recheck). The row must be an authorized charge on a pending_payment order. Moving the order to processing or shipped with PATCH /api/v1/orders/{id} captures the same way first. Staff: the orders area (write). No request body and no Idempotency-Key: the call is guarded on the row's status and claims the row before it calls the provider, so a retried or concurrent click (or a concurrent order move) is a 409 not_authorized_state and the provider is asked once. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route. Authenticated with a store PAT; read-only tokens may only GET.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The call ran: data is the order's payment rows after it (the same rows as GET /api/v1/orders/{id} payments). Read the rows for the outcome.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/StoreOrderPayment"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/InvalidToken"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "not_found: no charge row with this id on this order (or another store's order)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "not_authorized_state (the row is not an authorized charge, the order is no longer pending_payment, or another capture or void of this row is already running), not_supported (the provider cannot capture an authorization), gateway_not_configured (no usable credential for the store's current gateway_mode), or capture_failed: <reason> (the provider refused or did not answer; or the order moved on while capturing, in which case the captured money is recorded as an orphan payment to refund)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "description": "store_not_provisioned: the store row does not exist yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/orders/{orderId}/payments/{paymentId}/void": {
+      "parameters": [
+        {
+          "name": "orderId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "name": "paymentId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "POST /api/v1/orders/{orderId}/payments/{paymentId}/void",
+        "description": "Release (void) an AUTHORIZED gateway hold without taking the money. On success the row goes voided and, when the order is still pending_payment, the order is cancelled in the same batch exactly as PATCH /api/v1/orders/{id} {status: 'cancelled'} cancels it (tracked stock returned, bookings released, the cancelled email sent); a hold left on an already-cancelled order is just voided. Cancelling the order with that PATCH voids the hold first by itself. Staff: the orders area (write). No request body and no Idempotency-Key: the call is guarded on the row's status and claims the row before it calls the provider, so a retried or concurrent click (or a concurrent order move) is a 409 not_authorized_state and the provider is asked once. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route. Authenticated with a store PAT; read-only tokens may only GET.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The call ran: data is the order's payment rows after it (the same rows as GET /api/v1/orders/{id} payments). Read the rows for the outcome.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/StoreOrderPayment"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/InvalidToken"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "not_found: no charge row with this id on this order (or another store's order)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "not_authorized_state (the row is not an authorized charge, or another capture or void of this row is already running), not_supported (the provider cannot void), gateway_not_configured (no usable credential for the store's current gateway_mode), already_captured: <hint> (paypal: the provider already captured this hold - capture it to record the payment, then refund if needed), or void_failed: <reason> (the provider refused or did not answer; a payplus hold can be voided only on the day it was taken and only with terminal_uid and cashier_uid saved in its credentials — otherwise let it expire, or capture and refund it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "description": "store_not_provisioned: the store row does not exist yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/orders/{orderId}/payments/{paymentId}/recheck": {
+      "parameters": [
+        {
+          "name": "orderId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "name": "paymentId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "POST /api/v1/orders/{orderId}/payments/{paymentId}/recheck",
+        "description": "Ask the provider again about a PENDING gateway charge — a shopper who never came back from the payment page, a lost callback, or a capture the provider left pending — and record what the provider's own API now says, through the same settle path as the callback and the return page: paid, authorized, failed, or still pending (nothing is written when the provider has no news). Staff: the orders area (write). No request body and no Idempotency-Key: the call is guarded on the row's status, so a retried click finds the row already moved (409). Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route. Authenticated with a store PAT; read-only tokens may only GET.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The call ran: data is the order's payment rows after it (the same rows as GET /api/v1/orders/{id} payments). Read the rows for the outcome.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/StoreOrderPayment"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/InvalidToken"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "not_found: no charge row with this id on this order (or another store's order)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "not_pending (the row is not a pending charge), not_supported (no gateway for this provider — offline money is recorded with PATCH /api/v1/orders/{orderId}/payments/{paymentId}), or gateway_not_configured (no usable credential for the store's current gateway_mode)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "description": "store_not_provisioned: the store row does not exist yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/orders/{orderId}/refunds": {
       "parameters": [
         {
@@ -29785,7 +30407,7 @@
           "Store"
         ],
         "summary": "POST /api/v1/orders/{orderId}/refunds",
-        "description": "Refund a settled gateway (payplus) charge back to the shopper — the one operation that moves money OUT. Body {amount} in integer minor units for a partial refund, or an empty object {} to refund the full remaining balance. The refundable balance is DERIVED server-side (captured charge minus prior non-failed refund rows — the order's refundable_amount); an amount exceeding it is a 400 and the payment provider is never contacted. A charge refund is ALSO capped by what the named charge (charge_payment_id) took minus the refunds already routed through it: on a split-tender order a card charge never gives back more than the card took, and an empty body refunds the smaller of the two balances. The refund row is RESERVED (kind 'refund', status 'pending') under that balance atomically BEFORE the gateway is called, so two concurrent refunds can never together exceed the captured amount — the loser is a 409 and never reaches the gateway. On gateway success the row is confirmed 'received' with the provider's refund uid as its reference; on a DEFINITIVE gateway refusal (it processed the request and did not pay) it is marked 'failed' (502) — an audit row that releases the balance and counts toward nothing. An AMBIGUOUS gateway failure does NOT release it: a 5xx, a timed-out or rejected call, or a refunded amount that came back different from the one requested all leave the row 'pending' (502), because in those states nobody knows whether the money moved. A reservation left 'pending' — that case, a crash mid-refund, or a 500 from this call after the gateway confirmed — keeps holding its amount and blocks further refunds until it is reconciled with the provider and released with PATCH /api/v1/orders/{orderId}/payments/{paymentId}. Money is server-computed throughout: currency and captured amount come from the charge row, never the request. A PARTIAL refund leaves the order's status untouched (still a paid order) and restocks nothing; when the refunded total reaches the captured amount the order transitions to refunded through the ordinary state machine — judged at write time, so an order moved (e.g. to processing) while the gateway call was in flight still transitions — and TRACKED stock returns exactly once, same as PATCH {status: refunded}. A 409 also answers an order that is already fully refunded, has no settled payment, or whose charge was taken offline (bank_transfer, cash_on_delivery — refund those out-of-band, then move the order with PATCH /api/v1/orders/{id}). ORPHAN money — a kind 'orphan' payment row, the verified extra charge recorded when a second payment arrived on an already-settled order — is refunded through this same endpoint by naming the row: body {payment_id} (optionally with {amount} for a partial refund; omitted, the full outstanding amount capped at that row's amount). The orphan refund has its OWN balance, fully separate from the charge's, and that balance is PER ROW: what one orphan row still holds is its own amount minus the non-failed kind 'orphan_refund' rows that name it (refunds_payment_id), so each orphan on an order is refundable exactly once and only up to what it took. Orphan activity never changes refundable_amount in either direction — refunding the accidental second payment can never consume the shopper's right to a refund of the first. The gateway is called against the ORPHAN row's own transaction uid, the same reserve-first guard and definitive-vs-ambiguous handling apply (the reservation and result rows carry kind 'orphan_refund'), a stranded pending orphan_refund row blocks further orphan refunds until released with the payments PATCH, and an orphan refund NEVER moves the order's status — it is not a lifecycle event on the sale. Body {payment_id, reference} instead records an out-of-band return the operator already made in the provider's dashboard: an orphan_refund row lands 'received' with that reference under the same balance guard, the provider is not called, and the orphan row itself is never mutated. reference without payment_id is a 400 (a charge refund always goes through the gateway); a reference already recorded on another payment is a 409 (don't paste the charge's transaction uid); payment_id naming anything but a received orphan row of this order is a 400/409, an unknown payment_id a plain 404. An order holding more than one received orphan is refunded row by row, each against its own balance. The one case still refused with a 409 is an order carrying a non-failed orphan_refund row whose refunds_payment_id is null (only a refund recorded before that field existed): nothing can say which orphan it returned, so no orphan on that order may be targeted — resolve it in the provider's dashboard. An out-of-band record is FINAL: it consumes the outstanding orphan balance and cannot be undone or released. A 200 for an orphan refund returns orphan_outstanding in place of refundable_amount: the ORDER's outstanding orphan money after this refund — the sum of every received orphan row's own remaining amount. An unknown body field is a 400 unknown_field:<name>, never silently ignored. Another store's order id, an unknown id or a malformed id is a plain 404. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route. Authenticated with a store PAT; read-only tokens may only GET.",
+        "description": "Refund a settled gateway (payplus, paypal) charge back to the shopper — the one operation that moves money OUT. Body {amount} in integer minor units for a partial refund, or an empty object {} to refund the full remaining balance. The refundable balance is DERIVED server-side (captured charge minus prior non-failed refund rows — the order's refundable_amount); an amount exceeding it is a 400 and the payment provider is never contacted. A charge refund is ALSO capped by what the named charge (charge_payment_id) took minus the refunds already routed through it: on a split-tender order a card charge never gives back more than the card took, and an empty body refunds the smaller of the two balances. The refund row is RESERVED (kind 'refund', status 'pending') under that balance atomically BEFORE the gateway is called, so two concurrent refunds can never together exceed the captured amount — the loser is a 409 and never reaches the gateway. On gateway success the row is confirmed 'received' with the provider's refund uid as its reference; on a DEFINITIVE gateway refusal (it processed the request and did not pay) it is marked 'failed' (502) — an audit row that releases the balance and counts toward nothing. An AMBIGUOUS gateway failure does NOT release it: a 5xx, a timed-out or rejected call, or a refunded amount that came back different from the one requested all leave the row 'pending' (502), because in those states nobody knows whether the money moved. A reservation left 'pending' — that case, a crash mid-refund, or a 500 from this call after the gateway confirmed — keeps holding its amount and blocks further refunds until it is reconciled with the provider and released with PATCH /api/v1/orders/{orderId}/payments/{paymentId}. Money is server-computed throughout: currency and captured amount come from the charge row, never the request. A PARTIAL refund leaves the order's status untouched (still a paid order) and restocks nothing; when the refunded total reaches the captured amount the order transitions to refunded through the ordinary state machine — judged at write time, so an order moved (e.g. to processing) while the gateway call was in flight still transitions — and TRACKED stock returns exactly once, same as PATCH {status: refunded}. A 409 also answers an order that is already fully refunded, has no settled payment, or whose charge was taken offline (bank_transfer, cash_on_delivery — refund those out-of-band, then move the order with PATCH /api/v1/orders/{id}). ORPHAN money — a kind 'orphan' payment row, the verified extra charge recorded when a second payment arrived on an already-settled order — is refunded through this same endpoint by naming the row: body {payment_id} (optionally with {amount} for a partial refund; omitted, the full outstanding amount capped at that row's amount). The orphan refund has its OWN balance, fully separate from the charge's, and that balance is PER ROW: what one orphan row still holds is its own amount minus the non-failed kind 'orphan_refund' rows that name it (refunds_payment_id), so each orphan on an order is refundable exactly once and only up to what it took. Orphan activity never changes refundable_amount in either direction — refunding the accidental second payment can never consume the shopper's right to a refund of the first. The gateway is called against the ORPHAN row's own transaction uid, the same reserve-first guard and definitive-vs-ambiguous handling apply (the reservation and result rows carry kind 'orphan_refund'), a stranded pending orphan_refund row blocks further orphan refunds until released with the payments PATCH, and an orphan refund NEVER moves the order's status — it is not a lifecycle event on the sale. Body {payment_id, reference} instead records an out-of-band return the operator already made in the provider's dashboard: an orphan_refund row lands 'received' with that reference under the same balance guard, the provider is not called, and the orphan row itself is never mutated. reference without payment_id is a 400 (a charge refund always goes through the gateway); a reference already recorded on another payment is a 409 (don't paste the charge's transaction uid); payment_id naming anything but a received orphan row of this order is a 400/409, an unknown payment_id a plain 404. An order holding more than one received orphan is refunded row by row, each against its own balance. The one case still refused with a 409 is an order carrying a non-failed orphan_refund row whose refunds_payment_id is null (only a refund recorded before that field existed): nothing can say which orphan it returned, so no orphan on that order may be targeted — resolve it in the provider's dashboard. An out-of-band record is FINAL: it consumes the outstanding orphan balance and cannot be undone or released. A 200 for an orphan refund returns orphan_outstanding in place of refundable_amount: the ORDER's outstanding orphan money after this refund — the sum of every received orphan row's own remaining amount. An unknown body field is a 400 unknown_field:<name>, never silently ignored. Another store's order id, an unknown id or a malformed id is a plain 404. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route. Authenticated with a store PAT; read-only tokens may only GET. A refund the provider accepts but reports as PENDING (paypal) is recorded as received, like a completed one. An order whose only payment is an authorized hold took no money: it is a 409 pointing at the void (POST /api/v1/orders/{orderId}/payments/{paymentId}/void).",
         "security": [
           {
             "bearerAuth": []
@@ -29907,7 +30529,7 @@
             }
           },
           "409": {
-            "description": "Nothing refundable: no settled payment, an offline charge, already fully refunded, no gateway credential configured, or the balance changed concurrently (the loser of two simultaneous refunds — refused before the gateway is contacted); or the named charge is already fully refunded although the order still shows a balance (refund the rest outside the gateway, or name another charge_payment_id); or an Idempotency-Key replay that is pending, refused, or reused for a different refund",
+            "description": "Nothing refundable: no settled payment, an offline charge, already fully refunded, no gateway credential configured, or the balance changed concurrently (the loser of two simultaneous refunds — refused before the gateway is contacted); or the named charge is already fully refunded although the order still shows a balance (refund the rest outside the gateway, or name another charge_payment_id); or an Idempotency-Key replay that is pending, refused, or reused for a different refund; or the order's payment is only authorized (void the authorization instead); or the provider refunds only in full and a partial amount was asked (A <provider> payment can only be refunded in full (<n> minor units) — no shipped provider does today)",
             "content": {
               "application/json": {
                 "schema": {
@@ -30186,7 +30808,7 @@
           "Store"
         ],
         "summary": "POST /api/v1/payment-methods",
-        "description": "Create a payment method. provider and name are required; instructions defaults to null, enabled to 1, sort_order to 0. provider must be one of bank_transfer, cash_on_delivery, hyp, payplus — anything else is a 400, and any field outside the writable set is rejected as unknown_field:<name>. Creating a method for the registered-but-unimplemented provider (hyp) is allowed; taking money through it is refused at checkout until it is implemented. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route — the call returns 404 (or 401 when authentication fails first) and never store data. Authenticated with a store PAT; read-only tokens may only GET.",
+        "description": "Create a payment method. provider and name are required; instructions defaults to null, enabled to 1, sort_order to 0. provider must be one of bank_transfer, cash_on_delivery, hyp, payplus, paypal — anything else is a 400, and any field outside the writable set is rejected as unknown_field:<name>. Creating a method for the registered-but-unimplemented provider (hyp) is allowed; taking money through it is refused at checkout until it is implemented. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route — the call returns 404 (or 401 when authentication fails first) and never store data. Authenticated with a store PAT; read-only tokens may only GET.",
         "security": [
           {
             "bearerAuth": []
@@ -30209,9 +30831,10 @@
                       "bank_transfer",
                       "cash_on_delivery",
                       "hyp",
-                      "payplus"
+                      "payplus",
+                      "paypal"
                     ],
-                    "description": "The fixed provider kind this method is backed by — what payment code dispatches on. payplus is implemented (redirect flow: the storefront checkout hands the shopper off to the PayPlus-hosted payment page). hyp is registered but NOT yet implemented: a method may be configured for it, but checkout refuses it as not yet available."
+                    "description": "The fixed provider kind this method is backed by — what payment code dispatches on. payplus and paypal are implemented (redirect flow: the storefront checkout hands the shopper off to the provider-hosted payment page). hyp is registered but NOT yet implemented: a method may be configured for it, but checkout refuses it as not yet available."
                   },
                   "name": {
                     "type": "string",
@@ -30238,6 +30861,18 @@
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 9999
+                  },
+                  "country_allow": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z]{2}$"
+                    },
+                    "maxItems": 250,
+                    "description": "Limit the method to these countries: ISO 3166-1 alpha-2 codes, case-insensitive (stored upper-case, duplicates dropped); [] or null = every country. Anything else is a 400 (country_allow must be an array of at most 250 ISO country codes, or null / country_allow entries must be two-letter ISO 3166 country codes). Naming it while the store's upgrade has not yet added the column (migration 0359) is a 503 upgrade_in_progress: retry shortly; a write without it works throughout."
                   }
                 }
               }
@@ -30297,7 +30932,7 @@
             "$ref": "#/components/responses/RateLimited"
           },
           "503": {
-            "description": "Store not yet provisioned",
+            "description": "store_not_provisioned (the store row does not exist yet), or upgrade_in_progress (the body named country_allow before migration 0359 landed: retry shortly)",
             "content": {
               "application/json": {
                 "schema": {
@@ -30509,7 +31144,7 @@
           "Store"
         ],
         "summary": "PATCH /api/v1/payment-methods/{id}",
-        "description": "Partial update — send only changed fields (provider, name, instructions, enabled, sort_order). Every field is validated exactly as on create; an unknown field is unknown_field:<name>, and a body with nothing updatable is a 400. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route — the call returns 404 (or 401 when authentication fails first) and never store data. Authenticated with a store PAT; read-only tokens may only GET.",
+        "description": "Partial update — send only changed fields (provider, name, instructions, enabled, sort_order, country_allow). Every field is validated exactly as on create; an unknown field is unknown_field:<name>, and a body with nothing updatable is a 400. Served by STORE tenants only (product: \"store\" from GET /api/store); a CMS tenant has no such route — the call returns 404 (or 401 when authentication fails first) and never store data. Authenticated with a store PAT; read-only tokens may only GET.",
         "security": [
           {
             "bearerAuth": []
@@ -30528,9 +31163,10 @@
                       "bank_transfer",
                       "cash_on_delivery",
                       "hyp",
-                      "payplus"
+                      "payplus",
+                      "paypal"
                     ],
-                    "description": "The fixed provider kind this method is backed by — what payment code dispatches on. payplus is implemented (redirect flow: the storefront checkout hands the shopper off to the PayPlus-hosted payment page). hyp is registered but NOT yet implemented: a method may be configured for it, but checkout refuses it as not yet available."
+                    "description": "The fixed provider kind this method is backed by — what payment code dispatches on. payplus and paypal are implemented (redirect flow: the storefront checkout hands the shopper off to the provider-hosted payment page). hyp is registered but NOT yet implemented: a method may be configured for it, but checkout refuses it as not yet available."
                   },
                   "name": {
                     "type": "string",
@@ -30557,6 +31193,18 @@
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 9999
+                  },
+                  "country_allow": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z]{2}$"
+                    },
+                    "maxItems": 250,
+                    "description": "Limit the method to these countries: ISO 3166-1 alpha-2 codes, case-insensitive (stored upper-case, duplicates dropped); [] or null = every country. Anything else is a 400 (country_allow must be an array of at most 250 ISO country codes, or null / country_allow entries must be two-letter ISO 3166 country codes). Naming it while the store's upgrade has not yet added the column (migration 0359) is a 503 upgrade_in_progress: retry shortly; a write without it works throughout."
                   }
                 }
               }
@@ -30635,6 +31283,27 @@
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "description": "upgrade_in_progress: the update names a column the store's upgrade has not added yet (in this release only country_allow, migration 0359). Retry shortly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       },
@@ -35331,7 +36000,7 @@
           "Store"
         ],
         "summary": "PATCH /api/v1/settings",
-        "description": "Partial update; send only the fields to change. Only the 21 StoreSettings fields are writable — anything else in the body is ignored, not an error (id and slug can never be written). currency must be a 3-letter uppercase ISO 4217 code; tax_rate is a number 0-100; tax_enabled and tax_inclusive accept 0, 1, true or false (strings are a 400); shipping_enabled, tax_shipping and emails_enabled are STRICTLY 0 or 1 (true/false and strings are a 400 — a settings write that quietly means something else is how a store ends up shipping free, or mailing customers, without anyone deciding to); shipping_flat_amount is a non-negative INTEGER in minor units (a float is a 400, never rounded); email_log_retention_days is a non-negative INTEGER of days (0 = keep forever; a negative or fractional value is a 400). A body with nothing updatable is a 400, not a no-op 200. The tax and shipping fields are LIVE — checkout applies them from the next order on and snapshots the result; emails_enabled is also LIVE — while 1, a successful checkout emails the shopper an order confirmation and, when the store has an email set, the operator a new-order alert, and the same switch sends the shopper a payment-confirmed email when the order reaches `paid` and a status email on every subsequent transition (processing, shipped, completed, cancelled, refunded). Slice 5c-c: emails_enabled alone is not enough — mail also requires a connected Brevo account (`PUT /api/v1/email-credentials`); a store without one sends nothing. Slice 5c-d adds a fifth mail kind, refund_confirmed, sent by a call that causes NO status transition: when a stranded refund reservation confirms and its confirmed total now completes coverage of the capture, it corrects a refunded figure that status_refunded quoted too low, sent at most once per order. email_log_retention_days is also LIVE — checked once after every send batch to prune store_email_log — but nothing is actually pruned until migration 0061 has run against a given tenant's database. Only the analytics ids (google_analytics_id, facebook_pixel_id) are stored without being applied: the storefront emits them in slice 6, so do not report those as live behaviour. Served by STORE tenants with store data. On a CMS tenant the SAME path exists too: the CMS’s own /api/v1 mirror routes it to a different CMS resource, so a 200 here does not prove you are talking to a store — check GET /api/v1/users/me, whose `product` field names the product that answered. Authenticated with a store PAT; read-only tokens may only GET.",
+        "description": "Partial update; send only the fields to change. Only the writable StoreSettings fields may be sent (email_verification_since is read-only): any other key in the body — id and slug included — is a 400 unknown_field:<name> and nothing is written. currency must be a 3-letter uppercase ISO 4217 code; tax_rate is a number 0-100; tax_enabled and tax_inclusive accept 0, 1, true or false (strings are a 400); shipping_enabled, tax_shipping and emails_enabled are STRICTLY 0 or 1 (true/false and strings are a 400 — a settings write that quietly means something else is how a store ends up shipping free, or mailing customers, without anyone deciding to); shipping_flat_amount is a non-negative INTEGER in minor units (a float is a 400, never rounded); email_log_retention_days is a non-negative INTEGER of days (0 = keep forever; a negative or fractional value is a 400). A body with nothing updatable is a 400, not a no-op 200. The tax and shipping fields are LIVE — checkout applies them from the next order on and snapshots the result; emails_enabled is also LIVE — while 1, a successful checkout emails the shopper an order confirmation and, when the store has an email set, the operator a new-order alert, and the same switch sends the shopper a payment-confirmed email when the order reaches `paid` and a status email on every subsequent transition (processing, shipped, completed, cancelled, refunded). Slice 5c-c: emails_enabled alone is not enough — mail also requires a connected Brevo account (`PUT /api/v1/email-credentials`); a store without one sends nothing. Slice 5c-d adds a fifth mail kind, refund_confirmed, sent by a call that causes NO status transition: when a stranded refund reservation confirms and its confirmed total now completes coverage of the capture, it corrects a refunded figure that status_refunded quoted too low, sent at most once per order. email_log_retention_days is also LIVE — checked once after every send batch to prune store_email_log — but nothing is actually pruned until migration 0061 has run against a given tenant's database. Only the analytics ids (google_analytics_id, facebook_pixel_id) are stored without being applied: the storefront emits them in slice 6, so do not report those as live behaviour. Served by STORE tenants with store data. On a CMS tenant the SAME path exists too: the CMS’s own /api/v1 mirror routes it to a different CMS resource, so a 200 here does not prove you are talking to a store — check GET /api/v1/users/me, whose `product` field names the product that answered. Authenticated with a store PAT; read-only tokens may only GET.",
         "security": [
           {
             "bearerAuth": []
@@ -35482,6 +36151,14 @@
                       1
                     ],
                     "description": "Serve this store’s catalogue publicly at /products.json and /collections/{handle}/products.json, in Shopify’s shape, so tools written for Shopify can read it. Default 1. Strict 0 or 1: a boolean or the string \"no\" is a 400, never coerced, because coercing it would PUBLISH a catalogue the merchant had just asked to hide. Operator-only data (cost price, supplier, stock counts) is never included whatever this is set to. When 0, both endpoints return 404 rather than 403, so a disabled catalogue looks absent instead of withheld."
+                  },
+                  "payment_capture": {
+                    "type": "string",
+                    "enum": [
+                      "charge",
+                      "authorize"
+                    ],
+                    "description": "How a gateway payment is taken at checkout, store-wide: 'charge' (the default) takes the money at once; 'authorize' only places a hold on the shopper's card — the order stays pending_payment with an authorized payment row until staff capture it (POST /api/v1/orders/{orderId}/payments/{paymentId}/capture, or moving the order to processing or shipped) or void it (.../void, or cancelling the order). Holds end at the provider (the row's authorized_until); a lapsed one is cancelled by the unpaid-order sweep. Offline methods are unaffected; never selectable per request. Any other value is a 400 (payment_capture must be 'charge' or 'authorize'). Reads as 'charge' on a store whose upgrade has not yet added the column (migration 0360)."
                   }
                 }
               }
@@ -41486,6 +42163,30 @@
                     "local": {
                       "type": "boolean",
                       "description": "Store only: true for a store-only staff account (signs in with a store password, not EdgePress); false for an EdgePress (SSO) admin."
+                    },
+                    "site": {
+                      "type": "object",
+                      "description": "The site's identity, for labelling a connection: `name` is the site title (CMS) or store name, falling back to the host; `host` is the hostname the request reached.",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "host": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "profile": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "landing",
+                        "offer",
+                        null
+                      ],
+                      "description": "The product profile this tenant runs (\"landing\" on the CMS, \"offer\" on the store), or null for the full product."
                     }
                   }
                 }
@@ -45351,7 +46052,7 @@
           "Settings"
         ],
         "summary": "PUT /api/maintenance",
-        "description": "Admin only. Every field optional. `code`: 6-64 characters, or \"\" to remove it (then only staff and PATs get in). Setting or clearing the code, and switching from off to on, ends every pass already given out. A successful write purges the site's cached pages.",
+        "description": "Admin only. Every field optional. `code`: 6-64 characters, or \"\" to remove it (then only staff and PATs get in). Setting or clearing the code, and switching from off to on, ends every pass already given out. Turning maintenance off while it is on needs a connected email account on a provider the platform has switched on, else 409 `{error: email_not_connected, reason: no_account | provider_off}`. A successful write purges the site's cached pages.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -45401,6 +46102,31 @@
           },
           "403": {
             "$ref": "#/components/responses/ReadOnlyToken"
+          },
+          "409": {
+            "description": "Maintenance cannot be switched off: the site has no connected email account (`no_account`) or its provider is switched off (`provider_off`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "email_not_connected"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "no_account",
+                        "provider_off"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
@@ -45439,7 +46165,7 @@
           "Settings"
         ],
         "summary": "PUT /api/maintenance",
-        "description": "Admin only. Every field optional. `code`: 6-64 characters, or \"\" to remove it (then only staff and PATs get in). Setting or clearing the code, and switching from off to on, ends every pass already given out. A successful write purges the site's cached pages.",
+        "description": "Admin only. Every field optional. `code`: 6-64 characters, or \"\" to remove it (then only staff and PATs get in). Setting or clearing the code, and switching from off to on, ends every pass already given out. Turning maintenance off while it is on needs a connected email account on a provider the platform has switched on, else 409 `{error: email_not_connected, reason: no_account | provider_off}`. A successful write purges the site's cached pages.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -45489,6 +46215,31 @@
           },
           "403": {
             "$ref": "#/components/responses/ReadOnlyToken"
+          },
+          "409": {
+            "description": "Maintenance cannot be switched off: the site has no connected email account (`no_account`) or its provider is switched off (`provider_off`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "email_not_connected"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "no_account",
+                        "provider_off"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
@@ -48468,7 +49219,7 @@
         ],
         "summary": "List form submissions",
         "operationId": "listFormSubmissions",
-        "description": "The owner's inbox for the form block. Admin and editor only (a submission is visitors' personal data); a read-only token may read, a plugin token never can. Newest first, keyset-paged: pass the previous `next_cursor` as `cursor`. Rows are a lean preview; `GET /api/form-submissions/{id}` has the values. JSON by default; `format=csv` returns every matching row (not one page) as a download: submitted_at, status, form_name, then one column per field key; cells that start like a formula are neutralised.",
+        "description": "The owner's inbox for the form block. Admin and editor only (a submission is visitors' personal data); a read-only token may read, a plugin token never can. Newest first, keyset-paged: pass the previous `next_cursor` as `cursor`. Rows are a lean preview; `GET /api/form-submissions/{id}` has the values, or pass `include=values` for them on every row. JSON by default; `format=csv` returns every matching row (not one page) as a download: submitted_at, status, form_name, then one column per field key; cells that start like a formula are neutralised.",
         "parameters": [
           {
             "name": "status",
@@ -48522,6 +49273,18 @@
               "type": "integer",
               "minimum": 1
             }
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "values"
+              ]
+            },
+            "description": "`values`: each listed row also carries `values` (what the visitor typed, keyed by field key), exactly as GET /{id} returns it. Any other value is 400."
           },
           {
             "name": "format",
@@ -48578,6 +49341,11 @@
                             "type": "integer",
                             "nullable": true,
                             "description": "When the owner digest covering it was emailed; null = never emailed."
+                          },
+                          "values": {
+                            "type": "object",
+                            "additionalProperties": true,
+                            "description": "Field values keyed by field key. GET /{id} always; the list only with `?include=values`."
                           }
                         }
                       }
@@ -49899,7 +50667,7 @@
           "Store"
         ],
         "summary": "GET /api/v1/bookings",
-        "description": "Bookings of bookable services with start in [from, to] (store-local dates, at most 62 days inclusive), ordered by starts_at. No customer name or email; follow order_id. Read-only tokens may GET. Served by STORE tenants only (also the offer profile).",
+        "description": "Bookings of bookable services with start in [from, to] (store-local dates, at most 62 days inclusive), ordered by starts_at. No customer name or email; follow order_id. Read-only tokens may GET. Served by STORE tenants only (also the offer profile). Polling feed: ?newest=1 lists newest first by id with no from/to (400 if combined), optional status/resource, limit 1-100 (default 50); from/to are required without it.",
         "security": [
           {
             "bearerAuth": []
@@ -49909,20 +50677,22 @@
           {
             "name": "from",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "format": "date"
-            }
+            },
+            "description": "Required unless newest=1."
           },
           {
             "name": "to",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "format": "date"
-            }
+            },
+            "description": "Required unless newest=1."
           },
           {
             "name": "resource",
@@ -49942,6 +50712,27 @@
                 "released"
               ]
             }
+          },
+          {
+            "name": "newest",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "enum": [
+                1
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "description": "Only with newest=1."
           }
         ],
         "responses": {
