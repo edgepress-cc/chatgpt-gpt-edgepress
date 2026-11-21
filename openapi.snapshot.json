@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "EdgePress Tenant API",
-    "version": "1.88.0",
+    "version": "1.89.0",
     "description": "Per-tenant CMS API. Authenticate every request with a personal access token: `Authorization: Bearer epat_...`. Create + manage tokens at `/admin/settings/api-tokens`. Every token-authenticated response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` (epoch seconds); a 429 adds `Retry-After`."
   },
   "servers": [
@@ -6133,6 +6133,26 @@
           }
         },
         "description": "One payment row of a store order."
+      },
+      "StorageUsage": {
+        "type": "object",
+        "required": [
+          "used",
+          "cap"
+        ],
+        "properties": {
+          "used": {
+            "type": "integer",
+            "description": "Bytes of media and uploads the site stores."
+          },
+          "cap": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The site storage cap in bytes; null when none is set."
+          }
+        }
       }
     },
     "responses": {
@@ -9139,6 +9159,30 @@
           "403": {
             "$ref": "#/components/responses/ReadOnlyToken"
           },
+          "413": {
+            "description": "Storage full: the write would take the site past its storage cap. Body {error:\"storage_full\", used, cap}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "storage_full"
+                      ]
+                    },
+                    "used": {
+                      "type": "integer"
+                    },
+                    "cap": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
           "429": {
             "$ref": "#/components/responses/RateLimited"
           }
@@ -9249,11 +9293,8 @@
           "403": {
             "$ref": "#/components/responses/ReadOnlyToken"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimited"
-          },
           "413": {
-            "description": "Over the cap for the file's type.",
+            "description": "Over the cap for the file's type. Also 413 {error:\"storage_full\", used, cap} when the write would take the site past its storage cap.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9261,6 +9302,9 @@
                 }
               }
             }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -9340,9 +9384,6 @@
           "403": {
             "$ref": "#/components/responses/ReadOnlyToken"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimited"
-          },
           "404": {
             "description": "No such upload for this user.",
             "content": {
@@ -9364,7 +9405,7 @@
             }
           },
           "413": {
-            "description": "Part larger than partSize.",
+            "description": "Part larger than partSize. Also 413 {error:\"storage_full\", used, cap} when the write would take the site past its storage cap.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9372,6 +9413,9 @@
                 }
               }
             }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -9471,9 +9515,6 @@
           "403": {
             "$ref": "#/components/responses/ReadOnlyToken"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimited"
-          },
           "404": {
             "description": "No such upload for this user.",
             "content": {
@@ -9485,7 +9526,7 @@
             }
           },
           "413": {
-            "description": "Over the cap for the file's type.",
+            "description": "Over the cap for the file's type. Also 413 {error:\"storage_full\", used, cap} when the write would take the site past its storage cap.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9503,6 +9544,9 @@
                 }
               }
             }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -9583,6 +9627,30 @@
           },
           "403": {
             "$ref": "#/components/responses/ReadOnlyToken"
+          },
+          "413": {
+            "description": "Storage full: the write would take the site past its storage cap. Body {error:\"storage_full\", used, cap}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "storage_full"
+                      ]
+                    },
+                    "used": {
+                      "type": "integer"
+                    },
+                    "cap": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
@@ -9678,6 +9746,30 @@
           },
           "403": {
             "$ref": "#/components/responses/ReadOnlyToken"
+          },
+          "413": {
+            "description": "Storage full: the write would take the site past its storage cap. Body {error:\"storage_full\", used, cap}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "storage_full"
+                      ]
+                    },
+                    "used": {
+                      "type": "integer"
+                    },
+                    "cap": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
@@ -28548,7 +28640,7 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "413": {
-            "description": "Over 20MB (`file_too_large`)."
+            "description": "Over 20MB (`file_too_large`). Also 413 {error:\"storage_full\", used, cap} when the write would take the site past its storage cap."
           },
           "415": {
             "description": "Not an image, PDF, MP4/WebM video or MP3/WAV/OGG audio (`unsupported_type:<type>`)."
@@ -28617,7 +28709,7 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "413": {
-            "description": "Over 20MB (`file_too_large`)."
+            "description": "Over 20MB (`file_too_large`). Also 413 {error:\"storage_full\", used, cap} when the write would take the site past its storage cap."
           },
           "415": {
             "description": "Not an image, PDF, MP4/WebM video or MP3/WAV/OGG audio (`unsupported_type:<type>`)."
@@ -28726,6 +28818,30 @@
           },
           "404": {
             "description": "Media not found."
+          },
+          "413": {
+            "description": "Storage full: the write would take the site past its storage cap. Body {error:\"storage_full\", used, cap}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "storage_full"
+                      ]
+                    },
+                    "used": {
+                      "type": "integer"
+                    },
+                    "cap": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       },
@@ -46000,15 +46116,6 @@
           "400": {
             "description": "Bad skip value, or the body did not match its Content-Length"
           },
-          "409": {
-            "description": "The import is done or cancelled ({error:'job_finished'})"
-          },
-          "411": {
-            "description": "Content-Length required"
-          },
-          "413": {
-            "description": "Over the site's upload limit for its type; the file is left out"
-          },
           "401": {
             "description": "Not signed in"
           },
@@ -46017,6 +46124,15 @@
           },
           "404": {
             "description": "Unknown import, or (POST) a url that is not one of its media rows ({error:'not_found'})"
+          },
+          "409": {
+            "description": "The import is done or cancelled ({error:'job_finished'})"
+          },
+          "411": {
+            "description": "Content-Length required"
+          },
+          "413": {
+            "description": "Over the site's upload limit for its type; the file is left out. Also 413 {error:\"storage_full\", used, cap} when the write would take the site past its storage cap."
           }
         }
       }
@@ -50976,6 +51092,80 @@
           },
           "409": {
             "description": "already_released, booking_changed, slot_taken or slot_unavailable."
+          }
+        }
+      }
+    },
+    "/api/storage": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "GET /api/storage",
+        "description": "How much of the site storage cap is used. Any staff role may read, including a read-only token.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageUsage"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/InvalidToken"
+          },
+          "403": {
+            "description": "Forbidden (subscribers cannot read it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/v1/storage": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "GET /api/v1/storage",
+        "description": "How much of the site storage cap is used. Any staff role may read, including a read-only token.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageUsage"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/InvalidToken"
+          },
+          "403": {
+            "description": "Forbidden (subscribers cannot read it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
